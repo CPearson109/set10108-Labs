@@ -1,19 +1,17 @@
-# Project name and version
-project(set10108-cw1 LANGUAGES CXX CUDA)
 cmake_minimum_required(VERSION 3.17)
-
-# Set the C++ standard
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-# Enable CUDA support
-find_package(CUDA REQUIRED)
+# Include the directories for the project
+include_directories(../contrib)
 
-# Include directories (you can modify the path if necessary)
-include_directories(${CUDA_INCLUDE_DIRS} ../contrib)
+# Create a CPU target using main-cpu.cpp
+add_executable(cw1_cpu main_cpu.cpp)
 
-# Add the executable, using CUDA
-add_executable(cw1 main.cu)
+# Enable CUDA for GPU project
+enable_language(CUDA)
 
-# Ensure that CUDA is enabled for the target
-set_target_properties(cw1 PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+# Create a GPU target using main-gpu.cu
+add_executable(cw1_gpu main_gpu.cu)
+
+# Add any required libraries for CUDA here, for example:
+# target_link_libraries(cw1-gpu cuda cudart)
