@@ -4,8 +4,8 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
-#include <chrono>
 
+// Function to read the file and convert its content to lowercase
 std::vector<char> read_file(const char* filename)
 {
     // Open the file in binary mode
@@ -85,9 +85,10 @@ __global__ void count_token_occurrences(const char* data, int data_size, const c
 
 int main()
 {
-    // Example chosen file
+    // File path to the text file
     const char* filepath = "dataset/shakespeare.txt";
 
+    // Read the file and store its content
     std::vector<char> file_data = read_file(filepath);
     if (file_data.empty())
         return -1;
@@ -98,8 +99,26 @@ int main()
     cudaMalloc((void**)&d_data, data_size);
     cudaMemcpy(d_data, file_data.data(), data_size, cudaMemcpyHostToDevice);
 
-    // Example word list
+    // Word list to search for
     const char* words[] = { "sword", "fire", "death", "love", "hate", "the", "man", "woman" };
+    const int num_words = sizeof(words) / sizeof(words[0]);
+
+    // Find the maximum token length to allocate sufficient memory once
+    int max_token_length = 0;
+    for (int i = 0; i < num_words; ++i)
+    {
+        int token_length = strlen(words[i]);
+        if (token_length > max_token_length)
+            max_token_length = token_length;
+    }
+
+    // Allocate memory for token on device (once)
+    char* d_token;
+    cudaMalloc((void**)&d_token, max_token_length);
+
+    // Allocate memory for count on device (once)
+    int* d_count;
+    cudaMalloc((void**)&d_count, sizeof(int));
 
     // Create CUDA events for total timing
     cudaEvent_t total_start, total_stop;
@@ -110,19 +129,16 @@ int main()
     cudaEventRecord(total_start);
 
     // Loop through each word and find its occurrences
-    for (const char* word : words)
+    for (int w = 0; w < num_words; ++w)
     {
+        const char* word = words[w];
         int occurrences = 0;
         int token_length = strlen(word);
 
-        // Allocate memory for token on device
-        char* d_token;
-        cudaMalloc((void**)&d_token, token_length);
+        // Copy token to device
         cudaMemcpy(d_token, word, token_length, cudaMemcpyHostToDevice);
 
-        // Allocate memory for count
-        int* d_count;
-        cudaMalloc((void**)&d_count, sizeof(int));
+        // Reset count to zero
         cudaMemset(d_count, 0, sizeof(int));
 
         // Create CUDA events for timing each word
@@ -151,10 +167,6 @@ int main()
 
         std::cout << "Found " << occurrences << " occurrences of word: " << word << " in " << word_time_ms << " ms." << std::endl;
 
-        // Free device memory for each word
-        cudaFree(d_token);
-        cudaFree(d_count);
-
         // Destroy the word events
         cudaEventDestroy(word_start);
         cudaEventDestroy(word_stop);
@@ -170,7 +182,11 @@ int main()
 
     std::cout << "Total time to find all occurrences: " << total_time_ms << " ms." << std::endl;
 
-    // Free device memory
+    // Free device memory for token and count
+    cudaFree(d_token);
+    cudaFree(d_count);
+
+    // Free device memory for data
     cudaFree(d_data);
 
     // Destroy the total events
