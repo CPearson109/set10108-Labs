@@ -31,111 +31,42 @@ std::vector<char> read_file(const char* filename)
 
     file.close();
 
-    std::cout << "Successfully read " << buffer.size() << " bytes from the file." << std::endl;
-
     std::transform(buffer.begin(), buffer.end(), buffer.begin(), [](char c) { return std::tolower(c); });
 
     return buffer;
 }
 
-// CPU implementation
-int calc_token_occurrences_cpu(const std::vector<char>& data, const char* token)
-{
-    int numOccurrences = 0;
-    int tokenLen = int(strlen(token));
-    for (int i = 0; i < int(data.size()); ++i)
-    {
-        if (i + tokenLen > int(data.size()))
-            continue;
-
-        auto diff = strncmp(&data[i], token, tokenLen);
-        if (diff != 0)
-            continue;
-
-        int iPrefix = i - 1;
-        if (iPrefix >= 0 && data[iPrefix] >= 'a' && data[iPrefix] <= 'z')
-            continue;
-
-        int iSuffix = i + tokenLen;
-        if (iSuffix < int(data.size()) && data[iSuffix] >= 'a' && data[iSuffix] <= 'z')
-            continue;
-
-        ++numOccurrences;
-    }
-    return numOccurrences;
-}
-
-// GPU kernel for unoptimized implementation
-__global__ void count_token_occurrences_gpu(const char* data, int data_size, const char* token, int token_length, int* count)
-{
-    int idx = blockDim.x * blockIdx.x + threadIdx.x;
-
-    if (idx >= data_size)
-        return;
-
-    if (idx + token_length > data_size)
-        return;
-
-    bool match = true;
-    for (int i = 0; i < token_length; ++i)
-    {
-        if (data[idx + i] != token[i])
-        {
-            match = false;
-            break;
-        }
-    }
-    if (!match)
-        return;
-
-    int iPrefix = idx - 1;
-    if (iPrefix >= 0 && data[iPrefix] >= 'a' && data[iPrefix] <= 'z')
-        return;
-
-    int iSuffix = idx + token_length;
-    if (iSuffix < data_size && data[iSuffix] >= 'a' && data[iSuffix] <= 'z')
-        return;
-
-    atomicAdd(count, 1);
-}
-
 // GPU kernel for optimized implementation
-__global__ void count_token_occurrences_optimized(const char* data, int data_size, const char* token, int token_length, int* count)
+__global__ void count_token_occurrences_optimized(const char* data, int data_size, const char* token, int token_length, int* count, int valid_start_idx, int valid_end_idx)
 {
     extern __shared__ char shared_data[];
 
     int global_idx = blockDim.x * blockIdx.x + threadIdx.x;
-    int block_start = blockIdx.x * blockDim.x;
-    int block_size = blockDim.x;
+    int shared_idx = threadIdx.x;
 
-    // Calculate block end, ensure it's within data_size limits
-    int block_end = min(block_start + block_size, data_size);
+    if (global_idx >= data_size)
+        return;
 
-    // Load data into shared memory with overlap for token matching
-    if (global_idx < data_size)
-    {
-        shared_data[threadIdx.x] = data[global_idx];
+    // Load data into shared memory
+    if (global_idx < data_size) {
+        shared_data[shared_idx] = data[global_idx];
     }
 
-    // Copy extra bytes into shared memory for boundary overlap, to handle tokens spanning across block boundaries
-    if (threadIdx.x < token_length - 1 && global_idx + block_size < data_size)
-    {
-        shared_data[block_size + threadIdx.x] = data[global_idx + block_size];
+    // Load overlap for boundary checking
+    if (shared_idx < token_length - 1 && global_idx + blockDim.x < data_size) {
+        shared_data[blockDim.x + shared_idx] = data[global_idx + blockDim.x];
     }
 
     __syncthreads();
 
-    // Ensure that the thread is working within valid data range
-    if (global_idx >= data_size || global_idx + token_length > data_size)
+    if (global_idx + token_length > data_size)
         return;
 
-    // Loop unrolling for token matching to reduce loop overhead
+    // Token matching with unrolled loop
     bool match = true;
 #pragma unroll
-    for (int i = 0; i < token_length; ++i)
-    {
-        if (shared_data[threadIdx.x + i] != token[i])
-        {
+    for (int i = 0; i < token_length; ++i) {
+        if (shared_data[shared_idx + i] != token[i]) {
             match = false;
             break;
         }
@@ -144,150 +75,186 @@ __global__ void count_token_occurrences_optimized(const char* data, int data_siz
     if (!match)
         return;
 
-    // Check token prefix and suffix in global memory
+    // Check token boundaries
     if (global_idx > 0 && data[global_idx - 1] >= 'a' && data[global_idx - 1] <= 'z')
         return;
 
     if (global_idx + token_length < data_size && data[global_idx + token_length] >= 'a' && data[global_idx + token_length] <= 'z')
         return;
 
-    // Atomic increment to the count
+    // Check if match is within valid range
+    if (global_idx < valid_start_idx || global_idx + token_length > valid_end_idx)
+        return;
+
     atomicAdd(count, 1);
 }
 
-// Function to calculate optimal block and grid size based on device hardware
-void calculate_optimal_block_grid_size(int data_size, int token_length, int& optimal_threadsPerBlock, int& optimal_blocksPerGrid, size_t& sharedMemSize) {
+// Struct to hold per-chunk data
+struct ChunkData {
+    std::vector<char> data;
+    int data_size;
+    int valid_start_idx;
+    int valid_end_idx;
+    char* d_data;
+    int* d_count;
+    cudaStream_t stream;
+};
+
+// Function to split data into chunks with overlap
+std::vector<ChunkData> split_data(const std::vector<char>& data, int num_chunks, int overlap)
+{
+    std::vector<ChunkData> chunks(num_chunks);
+    size_t total_size = data.size();
+    size_t base_chunk_size = total_size / num_chunks;
+
+    for (int i = 0; i < num_chunks; ++i)
+    {
+        size_t start = i * base_chunk_size;
+        size_t end = (i == num_chunks - 1) ? total_size : (i + 1) * base_chunk_size;
+
+        if (i > 0)
+            start -= overlap;
+
+        if (i < num_chunks - 1)
+            end += overlap;
+
+        if (start > total_size)
+            start = total_size;
+        if (end > total_size)
+            end = total_size;
+
+        chunks[i].data.assign(data.begin() + start, data.begin() + end);
+        chunks[i].data_size = chunks[i].data.size();
+
+        if (i > 0)
+            chunks[i].valid_start_idx = overlap;
+        else
+            chunks[i].valid_start_idx = 0;
+
+        if (i < num_chunks - 1)
+            chunks[i].valid_end_idx = chunks[i].data_size - overlap;
+        else
+            chunks[i].valid_end_idx = chunks[i].data_size;
+
+        // Initialize device pointers and streams to nullptr
+        chunks[i].d_data = nullptr;
+        chunks[i].d_count = nullptr;
+        chunks[i].stream = 0;
+    }
+
+    return chunks;
+}
+
+// Function to determine the maximum number of concurrent kernels
+int get_max_concurrent_kernels()
+{
+    int device;
+    cudaGetDevice(&device);
+
     cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
+    cudaGetDeviceProperties(&prop, device);
 
-    int minGridSize;
-    cudaOccupancyMaxPotentialBlockSize(&minGridSize, &optimal_threadsPerBlock, count_token_occurrences_optimized, 0, 0);
-
-    optimal_blocksPerGrid = (data_size + optimal_threadsPerBlock - 1) / optimal_threadsPerBlock;
-
-    sharedMemSize = (optimal_threadsPerBlock + token_length - 1) * sizeof(char);
-
-    std::cout << "Optimal Threads per Block: " << optimal_threadsPerBlock << "\n";
-    std::cout << "Optimal Blocks per Grid: " << optimal_blocksPerGrid << "\n";
-    std::cout << "Shared Memory Size per Block: " << sharedMemSize << " bytes\n";
+    // Manually set a reasonable number of streams, such as 16
+    return 16;
 }
 
 
-// Class for GPU implementation
-class GpuWordCounter
+// Function to perform the tuning phase
+double test_configuration(int num_streams, int block_size, const std::vector<char>& file_data, const char* word, int token_length)
 {
-public:
-    GpuWordCounter(const std::vector<char>& data)
-    {
-        data_size = data.size();
+    const int NUM_TUNING_RUNS = 5;
 
-        cudaMalloc((void**)&d_data, data_size);
-        cudaMemcpy(d_data, data.data(), data_size, cudaMemcpyHostToDevice);
+    int overlap = token_length - 1;
+    std::vector<ChunkData> chunks = split_data(file_data, num_streams, overlap);
 
-        max_token_length = 64;
-        cudaMalloc((void**)&d_token, max_token_length);
-
-        cudaMalloc((void**)&d_count, sizeof(int));
-    }
-
-    ~GpuWordCounter()
-    {
-        cudaFree(d_data);
-        cudaFree(d_token);
-        cudaFree(d_count);
-    }
-
-    int countOccurrences(const char* token)
-    {
-        int occurrences = 0;
-        int token_length = strlen(token);
-
-        cudaMemcpy(d_token, token, token_length, cudaMemcpyHostToDevice);
-
-        cudaMemset(d_count, 0, sizeof(int));
-
-        int threadsPerBlock = 256;
-        int blocksPerGrid = (data_size + threadsPerBlock - 1) / threadsPerBlock;
-
-        count_token_occurrences_gpu << <blocksPerGrid, threadsPerBlock >> > (d_data, data_size, d_token, token_length, d_count);
-
-        cudaDeviceSynchronize();
-
-        cudaMemcpy(&occurrences, d_count, sizeof(int), cudaMemcpyDeviceToHost);
-
-        return occurrences;
-    }
-
-private:
-    char* d_data;
-    int data_size;
-
+    // Allocate and copy token to device
     char* d_token;
-    int max_token_length;
+    cudaMalloc((void**)&d_token, token_length);
+    cudaMemcpy(d_token, word, token_length, cudaMemcpyHostToDevice);
 
-    int* d_count;
-};
-
-// Class for optimized GPU implementation
-class GpuWordCounterOptimized
-{
-public:
-    GpuWordCounterOptimized(const std::vector<char>& data)
+    // Allocate device memory per chunk and create streams
+    for (int i = 0; i < num_streams; ++i)
     {
-        data_size = data.size();
+        ChunkData& chunk = chunks[i];
 
-        cudaMalloc((void**)&d_data, data_size);
-        cudaMemcpy(d_data, data.data(), data_size, cudaMemcpyHostToDevice);
+        // Create CUDA stream
+        cudaStreamCreate(&chunk.stream);
 
-        max_token_length = 64;
-        cudaMalloc((void**)&d_token, max_token_length);
+        // Allocate device memory for data
+        cudaMalloc((void**)&chunk.d_data, chunk.data_size);
 
-        cudaMalloc((void**)&d_count, sizeof(int));
+        // Copy data to device asynchronously
+        cudaMemcpyAsync(chunk.d_data, chunk.data.data(), chunk.data_size, cudaMemcpyHostToDevice, chunk.stream);
 
-        // Calculate optimal block and grid size and print it once
-        calculate_optimal_block_grid_size(data_size, max_token_length, optimal_threadsPerBlock, optimal_blocksPerGrid, sharedMemSize);
+        // Allocate device memory for count
+        cudaMalloc((void**)&chunk.d_count, sizeof(int));
     }
 
-    ~GpuWordCounterOptimized()
+    // Synchronize to ensure data is copied
+    for (int i = 0; i < num_streams; ++i)
     {
-        cudaFree(d_data);
-        cudaFree(d_token);
-        cudaFree(d_count);
+        cudaStreamSynchronize(chunks[i].stream);
     }
 
-    int countOccurrences(const char* token)
+    std::vector<double> durations;
+
+    for (int run = 0; run < NUM_TUNING_RUNS; ++run)
     {
-        int occurrences = 0;
-        int token_length = strlen(token);
+        auto start = std::chrono::steady_clock::now();
 
-        cudaMemcpy(d_token, token, token_length, cudaMemcpyHostToDevice);
+        // Per chunk processing
+        for (int i = 0; i < num_streams; ++i)
+        {
+            ChunkData& chunk = chunks[i];
 
-        cudaMemset(d_count, 0, sizeof(int));
+            // Initialize count to 0
+            cudaMemsetAsync(chunk.d_count, 0, sizeof(int), chunk.stream);
+        }
 
-        // Launch kernel with previously calculated optimal settings
-        count_token_occurrences_optimized << <optimal_blocksPerGrid, optimal_threadsPerBlock, sharedMemSize >> > (d_data, data_size, d_token, token_length, d_count);
+        // Launch kernels
+        for (int i = 0; i < num_streams; ++i)
+        {
+            ChunkData& chunk = chunks[i];
 
-        cudaDeviceSynchronize();
+            // Calculate grid and block sizes
+            int grid_size = (chunk.data_size + block_size - 1) / block_size;
 
-        cudaMemcpy(&occurrences, d_count, sizeof(int), cudaMemcpyDeviceToHost);
+            // Shared memory size
+            size_t shared_mem_size = (block_size + token_length - 1) * sizeof(char);
 
-        return occurrences;
+            // Launch kernel in stream
+            count_token_occurrences_optimized << <grid_size, block_size, shared_mem_size, chunk.stream >> > (
+                chunk.d_data, chunk.data_size, d_token, token_length, chunk.d_count, chunk.valid_start_idx, chunk.valid_end_idx);
+        }
+
+        // Synchronize streams
+        for (int i = 0; i < num_streams; ++i)
+        {
+            cudaStreamSynchronize(chunks[i].stream);
+        }
+
+        auto end = std::chrono::steady_clock::now();
+        std::chrono::duration<double, std::milli> elapsed = end - start;
+        durations.push_back(elapsed.count());
     }
 
-private:
-    char* d_data;
-    int data_size;
+    // Free device memory and destroy streams
+    for (int i = 0; i < num_streams; ++i)
+    {
+        cudaFree(chunks[i].d_data);
+        cudaFree(chunks[i].d_count);
+        cudaStreamDestroy(chunks[i].stream);
+    }
 
-    char* d_token;
-    int max_token_length;
+    // Free token memory
+    cudaFree(d_token);
 
-    int* d_count;
+    // Calculate average time
+    double total_time = std::accumulate(durations.begin(), durations.end(), 0.0);
+    double avg_time = total_time / durations.size();
 
-    // Store the optimal configuration for reuse
-    int optimal_threadsPerBlock;
-    int optimal_blocksPerGrid;
-    size_t sharedMemSize;
-};
+    return avg_time;
+}
 
 int main()
 {
@@ -300,93 +267,182 @@ int main()
     const char* words[] = { "sword", "fire", "death", "love", "hate", "the", "man", "woman" };
     const int num_words = sizeof(words) / sizeof(words[0]);
 
-    std::cout << "\n=== CPU Implementation ===\n";
-    for (int w = 0; w < num_words; ++w)
+    const int NUM_RUNS = 100;
+
+    // Get GPU properties
+    int device;
+    cudaGetDevice(&device);
+
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, device);
+
+    std::cout << "GPU Name: " << prop.name << "\n";
+    std::cout << "Compute Capability: " << prop.major << "." << prop.minor << "\n";
+    std::cout << "Total Global Memory: " << prop.totalGlobalMem / (1024 * 1024) << " MB\n";
+    std::cout << "Max Threads Per Block: " << prop.maxThreadsPerBlock << "\n";
+    std::cout << "Multiprocessor Count: " << prop.multiProcessorCount << "\n";
+    std::cout << "Concurrent Kernels: " << prop.concurrentKernels << "\n";
+
+    // Determine the optimal number of streams and block size through tuning
+    std::cout << "\n=== Tuning Phase ===\n";
+
+    std::vector<int> stream_options = { 1, 2, 4, 8, 16 };
+    std::vector<int> block_size_options = { 64, 128, 256, 512 };
+
+    // Limit the options based on GPU capabilities
+    int max_streams = get_max_concurrent_kernels();
+    stream_options.erase(std::remove_if(stream_options.begin(), stream_options.end(), [max_streams](int x) { return x > max_streams; }), stream_options.end());
+
+    int max_block_size = prop.maxThreadsPerBlock;
+    block_size_options.erase(std::remove_if(block_size_options.begin(), block_size_options.end(), [max_block_size](int x) { return x > max_block_size; }), block_size_options.end());
+
+    double best_time = std::numeric_limits<double>::max();
+    int best_num_streams = 1;
+    int best_block_size = 64;
+
+    const char* tuning_word = "the";
+    int tuning_token_length = strlen(tuning_word);
+
+    for (int num_streams : stream_options)
     {
-        const char* word = words[w];
-        std::vector<double> durations;
-        int occurrences = 0;
-
-        for (int run = 0; run < 100; ++run)
+        for (int block_size : block_size_options)
         {
-            auto start = std::chrono::steady_clock::now();
+            std::cout << "Testing num_streams = " << num_streams << ", block_size = " << block_size << "\n";
+            double avg_time = test_configuration(num_streams, block_size, file_data, tuning_word, tuning_token_length);
+            std::cout << "Average time: " << avg_time << " ms\n";
 
-            occurrences = calc_token_occurrences_cpu(file_data, word);
-
-            auto end = std::chrono::steady_clock::now();
-            std::chrono::duration<double, std::milli> elapsed = end - start;
-            durations.push_back(elapsed.count());
+            if (avg_time < best_time)
+            {
+                best_time = avg_time;
+                best_num_streams = num_streams;
+                best_block_size = block_size;
+            }
         }
-
-        auto minmax = std::minmax_element(durations.begin(), durations.end());
-        double total_time = std::accumulate(durations.begin(), durations.end(), 0.0);
-        double avg_time = total_time / durations.size();
-
-        std::cout << "Word: " << word << "\n";
-        std::cout << "Occurrences: " << occurrences << "\n";
-        std::cout << "Fastest time: " << *minmax.first << " ms\n";
-        std::cout << "Slowest time: " << *minmax.second << " ms\n";
-        std::cout << "Average time: " << avg_time << " ms\n\n";
     }
 
-    std::cout << "\n=== GPU Implementation ===\n";
-    GpuWordCounter gpu_counter(file_data);
+    std::cout << "\n=== Tuning Results ===\n";
+    std::cout << "Optimal number of streams: " << best_num_streams << "\n";
+    std::cout << "Optimal block size: " << best_block_size << "\n";
+
+    // Main processing using the optimal parameters
+    std::cout << "\n=== Main Processing ===\n";
+
     for (int w = 0; w < num_words; ++w)
     {
         const char* word = words[w];
-        std::vector<double> durations;
-        int occurrences = 0;
+        int token_length = strlen(word);
 
-        for (int run = 0; run < 100; ++run)
+        std::cout << "Word: " << word << "\n";
+
+        std::vector<double> durations;
+        int total_occurrences = 0;
+
+        // Split data into chunks with overlap
+        int overlap = token_length - 1;
+        std::vector<ChunkData> chunks = split_data(file_data, best_num_streams, overlap);
+
+        // Allocate and copy token to device
+        char* d_token;
+        cudaMalloc((void**)&d_token, token_length);
+        cudaMemcpy(d_token, word, token_length, cudaMemcpyHostToDevice);
+
+        // Allocate device memory per chunk and create streams
+        for (int i = 0; i < best_num_streams; ++i)
+        {
+            ChunkData& chunk = chunks[i];
+
+            // Create CUDA stream
+            cudaStreamCreate(&chunk.stream);
+
+            // Allocate device memory for data
+            cudaMalloc((void**)&chunk.d_data, chunk.data_size);
+
+            // Copy data to device asynchronously
+            cudaMemcpyAsync(chunk.d_data, chunk.data.data(), chunk.data_size, cudaMemcpyHostToDevice, chunk.stream);
+
+            // Allocate device memory for count
+            cudaMalloc((void**)&chunk.d_count, sizeof(int));
+        }
+
+        // Synchronize to ensure data is copied
+        for (int i = 0; i < best_num_streams; ++i)
+        {
+            cudaStreamSynchronize(chunks[i].stream);
+        }
+
+        for (int run = 0; run < NUM_RUNS; ++run)
         {
             auto start = std::chrono::steady_clock::now();
 
-            occurrences = gpu_counter.countOccurrences(word);
+            // Per chunk processing
+            for (int i = 0; i < best_num_streams; ++i)
+            {
+                ChunkData& chunk = chunks[i];
+
+                // Initialize count to 0
+                cudaMemsetAsync(chunk.d_count, 0, sizeof(int), chunk.stream);
+            }
+
+            // Launch kernels
+            for (int i = 0; i < best_num_streams; ++i)
+            {
+                ChunkData& chunk = chunks[i];
+
+                // Calculate grid and block sizes
+                int grid_size = (chunk.data_size + best_block_size - 1) / best_block_size;
+
+                // Shared memory size
+                size_t shared_mem_size = (best_block_size + token_length - 1) * sizeof(char);
+
+                // Launch kernel in stream
+                count_token_occurrences_optimized << <grid_size, best_block_size, shared_mem_size, chunk.stream >> > (
+                    chunk.d_data, chunk.data_size, d_token, token_length, chunk.d_count, chunk.valid_start_idx, chunk.valid_end_idx);
+            }
+
+            // Synchronize streams
+            for (int i = 0; i < best_num_streams; ++i)
+            {
+                cudaStreamSynchronize(chunks[i].stream);
+            }
+
+            // Copy counts back to host and sum
+            int occurrences = 0;
+            for (int i = 0; i < best_num_streams; ++i)
+            {
+                int chunk_occurrences = 0;
+                cudaMemcpy(&chunk_occurrences, chunks[i].d_count, sizeof(int), cudaMemcpyDeviceToHost);
+                occurrences += chunk_occurrences;
+            }
 
             auto end = std::chrono::steady_clock::now();
             std::chrono::duration<double, std::milli> elapsed = end - start;
             durations.push_back(elapsed.count());
+
+            total_occurrences = occurrences;
         }
 
-        auto minmax = std::minmax_element(durations.begin(), durations.end());
-        double total_time = std::accumulate(durations.begin(), durations.end(), 0.0);
-        double avg_time = total_time / durations.size();
-
-        std::cout << "Word: " << word << "\n";
-        std::cout << "Occurrences: " << occurrences << "\n";
-        std::cout << "Fastest time: " << *minmax.first << " ms\n";
-        std::cout << "Slowest time: " << *minmax.second << " ms\n";
-        std::cout << "Average time: " << avg_time << " ms\n\n";
-    }
-
-    std::cout << "\n=== Optimized GPU Implementation ===\n";
-    GpuWordCounterOptimized gpu_counter_optimized(file_data);
-    for (int w = 0; w < num_words; ++w)
-    {
-        const char* word = words[w];
-        std::vector<double> durations;
-        int occurrences = 0;
-
-        for (int run = 0; run < 100; ++run)
+        // Free device memory and destroy streams
+        for (int i = 0; i < best_num_streams; ++i)
         {
-            auto start = std::chrono::steady_clock::now();
-
-            occurrences = gpu_counter_optimized.countOccurrences(word);
-
-            auto end = std::chrono::steady_clock::now();
-            std::chrono::duration<double, std::milli> elapsed = end - start;
-            durations.push_back(elapsed.count());
+            cudaFree(chunks[i].d_data);
+            cudaFree(chunks[i].d_count);
+            cudaStreamDestroy(chunks[i].stream);
         }
 
-        auto minmax = std::minmax_element(durations.begin(), durations.end());
+        // Free token memory
+        cudaFree(d_token);
+
+        // Calculate slowest, fastest, and average times
         double total_time = std::accumulate(durations.begin(), durations.end(), 0.0);
         double avg_time = total_time / durations.size();
+        double fastest_time = *std::min_element(durations.begin(), durations.end());
+        double slowest_time = *std::max_element(durations.begin(), durations.end());
 
-        std::cout << "Word: " << word << "\n";
-        std::cout << "Occurrences: " << occurrences << "\n";
-        std::cout << "Fastest time: " << *minmax.first << " ms\n";
-        std::cout << "Slowest time: " << *minmax.second << " ms\n";
-        std::cout << "Average time: " << avg_time << " ms\n\n";
+        // Output occurrences and times
+        std::cout << "Occurrences for word \"" << word << "\": " << total_occurrences << "\n";
+        std::cout << "Fastest time: " << fastest_time << " ms\n";
+        std::cout << "Slowest time: " << slowest_time << " ms\n";
+        std::cout << "Average time with " << best_num_streams << " streams: " << avg_time << " ms\n\n";
     }
 
     return 0;
