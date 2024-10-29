@@ -75,7 +75,7 @@ __global__ void count_token_occurrences(const char* data, int data_size, const c
 
 int main()
 {
-    const char* filepath = "dataset/shakespeare.txt";
+    const char* filepath = "dataset/beowulf.txt";
 
     std::vector<char> file_data = read_file(filepath);
     if (file_data.empty())
@@ -115,7 +115,7 @@ int main()
         std::vector<double> durations;
         int occurrences = 0;
 
-        for (int run = 0; run < 100; ++run)
+        for (int run = 0; run < 1000; ++run)
         {
             // Reset count to zero
             cudaMemset(d_count, 0, sizeof(int));
