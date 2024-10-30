@@ -75,7 +75,7 @@ __global__ void count_token_occurrences(const char* data, int data_size, const c
 
 int main()
 {
-    const char* filepath = "dataset/beowulf.txt";
+    const char* filepath = "dataset/shakespeare.txt";
 
     std::vector<char> file_data = read_file(filepath);
     if (file_data.empty())
@@ -86,7 +86,7 @@ int main()
     cudaMalloc((void**)&d_data, data_size);
     cudaMemcpy(d_data, file_data.data(), data_size, cudaMemcpyHostToDevice);
 
-    const char* words[] = { "sword", "fire", "death", "love", "hate", "the", "man", "woman" };
+    const char* words[] = {"the"};
     const int num_words = sizeof(words) / sizeof(words[0]);
 
     int max_token_length = 0;

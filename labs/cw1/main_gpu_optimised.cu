@@ -92,7 +92,7 @@ __global__ void count_token_occurrences(const char* __restrict__ data, int data_
 int main()
 {
     // Read the file
-    const char* filepath = "dataset/beowulf.txt";
+    const char* filepath = "dataset/shakespeare.txt";
     std::vector<char> file_data = read_file(filepath);
     if (file_data.empty()) return -1;
 
@@ -102,13 +102,22 @@ int main()
     cudaMemcpy(d_data, file_data.data(), data_size, cudaMemcpyHostToDevice);
 
     // List of words to search for
-    const char* words[] = { "sword", "fire", "death", "love", "hate", "the", "man", "woman" };
+    const char* words[] = { "always" };
     int num_words = sizeof(words) / sizeof(words[0]);
 
     // Query device properties
     cudaDeviceProp deviceProp;
     int device = 0;
     cudaGetDeviceProperties(&deviceProp, device);
+
+    // Print out basic GPU specs on one line
+    std::cout << "GPU: " << deviceProp.name
+        << " | Compute Capability: " << deviceProp.major << "." << deviceProp.minor
+        << " | Total Global Memory: " << deviceProp.totalGlobalMem / (1024 * 1024) << " MB"
+        << " | SM Count: " << deviceProp.multiProcessorCount
+        << " | Max Threads/Block: " << deviceProp.maxThreadsPerBlock
+        << " | Warp Size: " << deviceProp.warpSize
+        << " | Clock Rate: " << deviceProp.clockRate / 1000 << " MHz\n";
 
     // Adjust variables based on hardware properties
     int warpSize = deviceProp.warpSize;
@@ -131,6 +140,11 @@ int main()
     cudaEventCreate(&word_start);
     cudaEventCreate(&word_stop);
 
+    // Print adjustments made based on GPU specs
+    std::cout << "Adjustments based on GPU specs:\n";
+    std::cout << " - Using " << threadsPerBlock << " threads per block (multiple of warp size " << warpSize << ")\n";
+    std::cout << " - Limiting max blocks per grid based on SM count and threads per SM\n";
+
     for (int w = 0; w < num_words; ++w) {
         const char* word = words[w];
         int token_length = strlen(word);
@@ -139,6 +153,8 @@ int main()
         totalThreadsNeeded = (data_size - token_length + 1);
         int blocksPerGrid = (totalThreadsNeeded + threadsPerBlock - 1) / threadsPerBlock;
         blocksPerGrid = std::min(blocksPerGrid, deviceProp.multiProcessorCount * maxBlocksPerSM);
+
+        std::cout << " - For word \"" << word << "\": blocks per grid set to " << blocksPerGrid << "\n";
 
         // Copy current word to constant memory
         cudaMemcpyToSymbol(d_token_const, word, token_length);
