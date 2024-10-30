@@ -4,13 +4,13 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
-#include <numeric>
+#include <filesystem>
+#include <sstream>
 
 // Function to read the file and convert its content to lowercase
-std::vector<char> read_file(const char* filename)
+std::vector<char> read_file(const std::string& filename)
 {
     std::ifstream file(filename, std::ios::binary);
-
     if (!file) {
         std::cerr << "Error: Could not open the file " << filename << std::endl;
         return {};
@@ -18,18 +18,15 @@ std::vector<char> read_file(const char* filename)
 
     file.seekg(0, std::ios::end);
     std::streamsize fileSize = file.tellg();
-
     file.seekg(0, std::ios::beg);
 
     std::vector<char> buffer(fileSize);
-
     if (!file.read(buffer.data(), fileSize)) {
         std::cerr << "Error: Could not read the file content." << std::endl;
         return {};
     }
 
     file.close();
-
     std::transform(buffer.begin(), buffer.end(), buffer.begin(), [](char c) { return std::tolower(c); });
 
     return buffer;
@@ -39,19 +36,13 @@ __global__ void count_token_occurrences(const char* data, int data_size, const c
 {
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
 
-    if (idx >= data_size)
-        return;
-
-    // Check if token matches at position idx
-    if (idx + token_length > data_size)
+    if (idx >= data_size || idx + token_length > data_size)
         return;
 
     // Compare token with data at position idx
     bool match = true;
-    for (int i = 0; i < token_length; ++i)
-    {
-        if (data[idx + i] != token[i])
-        {
+    for (int i = 0; i < token_length; ++i) {
+        if (data[idx + i] != token[i]) {
             match = false;
             break;
         }
@@ -69,14 +60,30 @@ __global__ void count_token_occurrences(const char* data, int data_size, const c
     if (iSuffix < data_size && data[iSuffix] >= 'a' && data[iSuffix] <= 'z')
         return;
 
-    // If we reach here, it's a valid occurrence
     atomicAdd(count, 1);
 }
 
 int main()
 {
-    const char* filepath = "dataset/shakespeare.txt";
+    // Display available files in the dataset folder
+    std::string datasetFolder = "dataset";
+    std::vector<std::string> txtFiles;
 
+    std::cout << "Available text files in '" << datasetFolder << "':\n";
+    for (const auto& entry : std::filesystem::directory_iterator(datasetFolder)) {
+        if (entry.path().extension() == ".txt") {
+            txtFiles.push_back(entry.path().filename().string());
+            std::cout << " - " << entry.path().filename().string() << std::endl;
+        }
+    }
+
+    // Prompt user for file selection
+    std::string filename;
+    std::cout << "Enter the filename you want to search in: ";
+    std::cin >> filename;
+    std::string filepath = datasetFolder + "/" + filename;
+
+    // Read the file
     std::vector<char> file_data = read_file(filepath);
     if (file_data.empty())
         return -1;
@@ -86,85 +93,60 @@ int main()
     cudaMalloc((void**)&d_data, data_size);
     cudaMemcpy(d_data, file_data.data(), data_size, cudaMemcpyHostToDevice);
 
-    const char* words[] = {"the"};
-    const int num_words = sizeof(words) / sizeof(words[0]);
+    // Prompt user for words to search, separated by comma
+    std::string inputWords;
+    std::cout << "Enter words to search for, separated by a comma (','): ";
+    std::cin.ignore();
+    std::getline(std::cin, inputWords);
 
-    int max_token_length = 0;
-    for (int i = 0; i < num_words; ++i)
-    {
-        int token_length = strlen(words[i]);
-        if (token_length > max_token_length)
-            max_token_length = token_length;
-    }
+    // Tokenize the input words and search each word
+    std::istringstream iss(inputWords);
+    std::string word;
+    while (std::getline(iss, word, ',')) {
+        word.erase(std::remove(word.begin(), word.end(), ' '), word.end()); // Remove any whitespace
+        int token_length = word.length();
 
-    char* d_token;
-    cudaMalloc((void**)&d_token, max_token_length);
+        char* d_token;
+        int* d_count;
+        cudaMalloc((void**)&d_token, token_length);
+        cudaMalloc((void**)&d_count, sizeof(int));
 
-    int* d_count;
-    cudaMalloc((void**)&d_count, sizeof(int));
+        // Copy token and reset count
+        cudaMemcpy(d_token, word.c_str(), token_length, cudaMemcpyHostToDevice);
+        cudaMemset(d_count, 0, sizeof(int));
 
-    // Loop through each word and run 100 iterations
-    for (int w = 0; w < num_words; ++w)
-    {
-        const char* word = words[w];
-        int token_length = strlen(word);
+        // Create CUDA events for timing
+        cudaEvent_t start, stop;
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
 
-        // Copy token to device
-        cudaMemcpy(d_token, word, token_length, cudaMemcpyHostToDevice);
+        // Start timing and launch kernel
+        cudaEventRecord(start);
+        int threadsPerBlock = 256;
+        int blocksPerGrid = (data_size + threadsPerBlock - 1) / threadsPerBlock;
+        count_token_occurrences<<<blocksPerGrid, threadsPerBlock>>>(d_data, data_size, d_token, token_length, d_count);
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
 
-        std::vector<double> durations;
-        int occurrences = 0;
-
-        for (int run = 0; run < 1000; ++run)
-        {
-            // Reset count to zero
-            cudaMemset(d_count, 0, sizeof(int));
-
-            // Create CUDA events for timing each run
-            cudaEvent_t word_start, word_stop;
-            cudaEventCreate(&word_start);
-            cudaEventCreate(&word_stop);
-
-            // Record the start event for the word search
-            cudaEventRecord(word_start);
-
-            // Launch kernel
-            int threadsPerBlock = 256;
-            int blocksPerGrid = (data_size + threadsPerBlock - 1) / threadsPerBlock;
-            count_token_occurrences << <blocksPerGrid, threadsPerBlock >> > (d_data, data_size, d_token, token_length, d_count);
-
-            // Record the stop event
-            cudaEventRecord(word_stop);
-            cudaEventSynchronize(word_stop);
-
-            // Calculate elapsed time
-            float word_time_ms = 0;
-            cudaEventElapsedTime(&word_time_ms, word_start, word_stop);
-            durations.push_back(word_time_ms);
-
-            // Destroy events after each run
-            cudaEventDestroy(word_start);
-            cudaEventDestroy(word_stop);
-        }
-
-        // Copy count back to host after the final run
+        // Get time and count results
+        float elapsedTime;
+        cudaEventElapsedTime(&elapsedTime, start, stop);
+        int occurrences;
         cudaMemcpy(&occurrences, d_count, sizeof(int), cudaMemcpyDeviceToHost);
 
-        // Compute fastest, slowest, and average times
-        auto minmax = std::minmax_element(durations.begin(), durations.end());
-        double total_time = std::accumulate(durations.begin(), durations.end(), 0.0);
-        double avg_time = total_time / durations.size();
+        // Output results
+        std::cout << "Word: " << word << "\n"
+                  << "Occurrences: " << occurrences << "\n"
+                  << "Time taken: " << elapsedTime << " ms\n\n";
 
-        std::cout << "Word: " << word << "\n";
-        std::cout << "Occurrences: " << occurrences << "\n";
-        std::cout << "Fastest time: " << *minmax.first << " ms\n";
-        std::cout << "Slowest time: " << *minmax.second << " ms\n";
-        std::cout << "Average time: " << avg_time << " ms\n\n";
+        // Free resources for this word
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+        cudaFree(d_token);
+        cudaFree(d_count);
     }
 
     // Free device memory
-    cudaFree(d_token);
-    cudaFree(d_count);
     cudaFree(d_data);
 
     return 0;

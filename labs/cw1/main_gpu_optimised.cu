@@ -5,7 +5,13 @@
 #include <algorithm>
 #include <cstring>
 #include <numeric>
-#include <cfloat> // For FLT_MAX
+#include <cfloat> 
+#include <filesystem>
+#include <string>
+#include <sstream>
+#include <limits>
+
+namespace fs = std::filesystem;
 
 std::vector<char> read_file(const char* filename)
 {
@@ -91,19 +97,68 @@ __global__ void count_token_occurrences(const char* __restrict__ data, int data_
 
 int main()
 {
+    // List all .txt files in the dataset folder
+    std::string dataset_dir = "dataset";
+    std::vector<std::string> txt_files;
+
+    for (const auto& entry : fs::directory_iterator(dataset_dir)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".txt") {
+            txt_files.push_back(entry.path().filename().string());
+        }
+    }
+
+    if (txt_files.empty()) {
+        std::cerr << "No .txt files found in the dataset folder." << std::endl;
+        return -1;
+    }
+
+    std::cout << "Available text files in the dataset folder:" << std::endl;
+    for (size_t i = 0; i < txt_files.size(); ++i) {
+        std::cout << i + 1 << ". " << txt_files[i] << std::endl;
+    }
+
+    std::cout << "Please select a file by entering the corresponding number: ";
+    size_t file_choice = 0;
+    std::cin >> file_choice;
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n'); // clear input buffer
+
+    if (file_choice < 1 || file_choice > txt_files.size()) {
+        std::cerr << "Invalid file selection." << std::endl;
+        return -1;
+    }
+
+    std::string filepath = dataset_dir + "/" + txt_files[file_choice - 1];
+
+    std::cout << "Enter the words to search for, separated by commas: ";
+    std::string words_input;
+    std::getline(std::cin, words_input);
+
+    // Split the input into words
+    std::vector<std::string> words;
+    std::stringstream ss(words_input);
+    std::string word;
+    while (std::getline(ss, word, ',')) {
+        // Remove leading and trailing whitespace from word
+        word.erase(0, word.find_first_not_of(" \t\n\r\f\v"));
+        word.erase(word.find_last_not_of(" \t\n\r\f\v") + 1);
+        if (!word.empty()) {
+            words.push_back(word);
+        }
+    }
+
+    if (words.empty()) {
+        std::cerr << "No words entered to search for." << std::endl;
+        return -1;
+    }
+
     // Read the file
-    const char* filepath = "dataset/shakespeare.txt";
-    std::vector<char> file_data = read_file(filepath);
+    std::vector<char> file_data = read_file(filepath.c_str());
     if (file_data.empty()) return -1;
 
     size_t data_size = file_data.size();
     char* d_data;
     cudaMalloc((void**)&d_data, data_size);
     cudaMemcpy(d_data, file_data.data(), data_size, cudaMemcpyHostToDevice);
-
-    // List of words to search for
-    const char* words[] = { "always" };
-    int num_words = sizeof(words) / sizeof(words[0]);
 
     // Query device properties
     cudaDeviceProp deviceProp;
@@ -112,12 +167,8 @@ int main()
 
     // Print out basic GPU specs on one line
     std::cout << "GPU: " << deviceProp.name
-        << " | Compute Capability: " << deviceProp.major << "." << deviceProp.minor
         << " | Total Global Memory: " << deviceProp.totalGlobalMem / (1024 * 1024) << " MB"
-        << " | SM Count: " << deviceProp.multiProcessorCount
-        << " | Max Threads/Block: " << deviceProp.maxThreadsPerBlock
-        << " | Warp Size: " << deviceProp.warpSize
-        << " | Clock Rate: " << deviceProp.clockRate / 1000 << " MHz\n";
+        << " | Max Threads/Block: " << deviceProp.maxThreadsPerBlock << "\n";
 
     // Adjust variables based on hardware properties
     int warpSize = deviceProp.warpSize;
@@ -128,13 +179,6 @@ int main()
     if (threadsPerBlock > maxThreadsPerBlock)
         threadsPerBlock = maxThreadsPerBlock;
 
-    int totalThreadsNeeded = (data_size - 1);  // Placeholder size; adjusted per word below
-
-    // Allocate counts array
-    int* d_counts;
-    cudaMalloc((void**)&d_counts, totalThreadsNeeded * sizeof(int));
-    int* h_counts = new int[totalThreadsNeeded];
-
     // CUDA events for timing
     cudaEvent_t word_start, word_stop;
     cudaEventCreate(&word_start);
@@ -142,57 +186,53 @@ int main()
 
     // Print adjustments made based on GPU specs
     std::cout << "Adjustments based on GPU specs:\n";
-    std::cout << " - Using " << threadsPerBlock << " threads per block (multiple of warp size " << warpSize << ")\n";
-    std::cout << " - Limiting max blocks per grid based on SM count and threads per SM\n";
+    std::cout << " - Using " << threadsPerBlock << " threads per block " << warpSize << "\n";
 
-    for (int w = 0; w < num_words; ++w) {
-        const char* word = words[w];
-        int token_length = strlen(word);
+    for (size_t w = 0; w < words.size(); ++w) {
+        const std::string& word = words[w];
+        int token_length = word.length();
 
         // Adjust total threads needed for each word's size
-        totalThreadsNeeded = (data_size - token_length + 1);
+        int totalThreadsNeeded = (data_size - token_length + 1);
         int blocksPerGrid = (totalThreadsNeeded + threadsPerBlock - 1) / threadsPerBlock;
         blocksPerGrid = std::min(blocksPerGrid, deviceProp.multiProcessorCount * maxBlocksPerSM);
 
         std::cout << " - For word \"" << word << "\": blocks per grid set to " << blocksPerGrid << "\n";
 
         // Copy current word to constant memory
-        cudaMemcpyToSymbol(d_token_const, word, token_length);
+        cudaMemcpyToSymbol(d_token_const, word.c_str(), token_length);
 
-        float fastest_time = FLT_MAX, slowest_time = 0, total_time = 0;
-        int occurrences = 0;
-        int num_runs = 1000;
+        // Allocate counts array
+        int* d_counts;
+        cudaMalloc((void**)&d_counts, totalThreadsNeeded * sizeof(int));
+        int* h_counts = new int[totalThreadsNeeded];
 
-        for (int run = 0; run < num_runs; ++run)
-        {
-            cudaEventRecord(word_start);
-            count_token_occurrences << <blocksPerGrid, threadsPerBlock >> > (d_data, data_size, token_length, d_counts);
-            cudaEventRecord(word_stop);
-            cudaEventSynchronize(word_stop);
+        float word_time_ms = 0;
 
-            float word_time_ms;
-            cudaEventElapsedTime(&word_time_ms, word_start, word_stop);
-            fastest_time = std::min(fastest_time, word_time_ms);
-            slowest_time = std::max(slowest_time, word_time_ms);
-            total_time += word_time_ms;
-        }
+        // Run the kernel and time it
+        cudaEventRecord(word_start);
+        count_token_occurrences << <blocksPerGrid, threadsPerBlock >> > (d_data, data_size, token_length, d_counts);
+        cudaEventRecord(word_stop);
+        cudaEventSynchronize(word_stop);
+
+        cudaEventElapsedTime(&word_time_ms, word_start, word_stop);
 
         // Copy counts back to host
         cudaMemcpy(h_counts, d_counts, totalThreadsNeeded * sizeof(int), cudaMemcpyDeviceToHost);
-        occurrences = std::accumulate(h_counts, h_counts + totalThreadsNeeded, 0);
+        int occurrences = std::accumulate(h_counts, h_counts + totalThreadsNeeded, 0);
 
         // Print results for the current word
         std::cout << "Word: " << word << "\n";
         std::cout << "Occurrences: " << occurrences << "\n";
-        std::cout << "Fastest time: " << fastest_time << " ms\n";
-        std::cout << "Slowest time: " << slowest_time << " ms\n";
-        std::cout << "Average time: " << total_time / num_runs << " ms\n\n";
+        std::cout << "Time taken: " << word_time_ms << " ms\n\n";
+
+        // Clean up
+        cudaFree(d_counts);
+        delete[] h_counts;
     }
 
     // Clean up
     cudaFree(d_data);
-    cudaFree(d_counts);
-    delete[] h_counts;
     cudaEventDestroy(word_start);
     cudaEventDestroy(word_stop);
 
