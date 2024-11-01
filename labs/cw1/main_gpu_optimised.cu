@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <numeric>
-#include <cfloat> 
+#include <cfloat>
 #include <filesystem>
 #include <string>
 #include <sstream>
@@ -113,31 +113,37 @@ int main()
     }
 
     std::cout << "Available text files in the dataset folder:" << std::endl;
-    for (size_t i = 0; i < txt_files.size(); ++i) {
-        std::cout << i + 1 << ". " << txt_files[i] << std::endl;
+    for (const auto& filename : txt_files) {
+        std::cout << " - " << filename << std::endl;
     }
 
-    std::cout << "Please select a file by entering the corresponding number: ";
-    size_t file_choice = 0;
-    std::cin >> file_choice;
-    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n'); // clear input buffer
+    // Prompt user for file selection
+    std::cout << "Please enter the name of the file you wish to select: ";
+    std::string filename;
+    std::getline(std::cin, filename);
 
-    if (file_choice < 1 || file_choice > txt_files.size()) {
-        std::cerr << "Invalid file selection." << std::endl;
+    // Remove leading/trailing whitespace from filename
+    filename.erase(0, filename.find_first_not_of(" \t\n\r\f\v"));
+    filename.erase(filename.find_last_not_of(" \t\n\r\f\v") + 1);
+
+    // Check if the file exists in the dataset folder
+    if (std::find(txt_files.begin(), txt_files.end(), filename) == txt_files.end()) {
+        std::cerr << "Error: File not found in the dataset folder." << std::endl;
         return -1;
     }
 
-    std::string filepath = dataset_dir + "/" + txt_files[file_choice - 1];
+    std::string filepath = dataset_dir + "/" + filename;
 
-    std::cout << "Enter the words to search for, separated by commas: ";
+    // Prompt user for words to search, separated by spaces
+    std::cout << "Please enter the word(s) you wish to search for, separated by spaces: ";
     std::string words_input;
     std::getline(std::cin, words_input);
 
     // Split the input into words
     std::vector<std::string> words;
-    std::stringstream ss(words_input);
+    std::istringstream iss(words_input);
     std::string word;
-    while (std::getline(ss, word, ',')) {
+    while (iss >> word) {
         // Remove leading and trailing whitespace from word
         word.erase(0, word.find_first_not_of(" \t\n\r\f\v"));
         word.erase(word.find_last_not_of(" \t\n\r\f\v") + 1);
@@ -179,21 +185,15 @@ int main()
     if (threadsPerBlock > maxThreadsPerBlock)
         threadsPerBlock = maxThreadsPerBlock;
 
-    // CUDA events for timing
-    cudaEvent_t word_start, word_stop;
-    cudaEventCreate(&word_start);
-    cudaEventCreate(&word_stop);
-
     // Print adjustments made based on GPU specs
     std::cout << "Adjustments based on GPU specs:\n";
-    std::cout << " - Using " << threadsPerBlock << " threads per block " << warpSize << "\n";
+    std::cout << " - Using " << threadsPerBlock << " threads per block\n";
 
-    for (size_t w = 0; w < words.size(); ++w) {
-        const std::string& word = words[w];
+    for (const auto& word : words) {
         int token_length = word.length();
 
         // Adjust total threads needed for each word's size
-        int totalThreadsNeeded = (data_size - token_length + 1);
+        int totalThreadsNeeded = data_size;
         int blocksPerGrid = (totalThreadsNeeded + threadsPerBlock - 1) / threadsPerBlock;
         blocksPerGrid = std::min(blocksPerGrid, deviceProp.multiProcessorCount * maxBlocksPerSM);
 
@@ -203,11 +203,17 @@ int main()
         cudaMemcpyToSymbol(d_token_const, word.c_str(), token_length);
 
         // Allocate counts array
+        int num_counts = blocksPerGrid * threadsPerBlock;
         int* d_counts;
-        cudaMalloc((void**)&d_counts, totalThreadsNeeded * sizeof(int));
-        int* h_counts = new int[totalThreadsNeeded];
+        cudaMalloc((void**)&d_counts, num_counts * sizeof(int));
+        int* h_counts = new int[num_counts];
 
         float word_time_ms = 0;
+
+        // Create CUDA events for timing
+        cudaEvent_t word_start, word_stop;
+        cudaEventCreate(&word_start);
+        cudaEventCreate(&word_stop);
 
         // Run the kernel and time it
         cudaEventRecord(word_start);
@@ -218,8 +224,8 @@ int main()
         cudaEventElapsedTime(&word_time_ms, word_start, word_stop);
 
         // Copy counts back to host
-        cudaMemcpy(h_counts, d_counts, totalThreadsNeeded * sizeof(int), cudaMemcpyDeviceToHost);
-        int occurrences = std::accumulate(h_counts, h_counts + totalThreadsNeeded, 0);
+        cudaMemcpy(h_counts, d_counts, num_counts * sizeof(int), cudaMemcpyDeviceToHost);
+        int occurrences = std::accumulate(h_counts, h_counts + num_counts, 0);
 
         // Print results for the current word
         std::cout << "Word: " << word << "\n";
@@ -229,12 +235,12 @@ int main()
         // Clean up
         cudaFree(d_counts);
         delete[] h_counts;
+        cudaEventDestroy(word_start);
+        cudaEventDestroy(word_stop);
     }
 
     // Clean up
     cudaFree(d_data);
-    cudaEventDestroy(word_start);
-    cudaEventDestroy(word_stop);
 
     return 0;
 }

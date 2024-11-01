@@ -27,7 +27,8 @@ std::vector<char> read_file(const std::string& filename)
     }
 
     file.close();
-    std::transform(buffer.begin(), buffer.end(), buffer.begin(), [](char c) { return std::tolower(c); });
+    std::transform(buffer.begin(), buffer.end(), buffer.begin(),
+        [](unsigned char c) { return std::tolower(c); });
 
     return buffer;
 }
@@ -79,7 +80,7 @@ int main()
 
     // Prompt user for file selection
     std::string filename;
-    std::cout << "Enter the filename you want to search in: ";
+    std::cout << "Please enter the name of the file you wish to select: ";
     std::cin >> filename;
     std::string filepath = datasetFolder + "/" + filename;
 
@@ -93,17 +94,20 @@ int main()
     cudaMalloc((void**)&d_data, data_size);
     cudaMemcpy(d_data, file_data.data(), data_size, cudaMemcpyHostToDevice);
 
-    // Prompt user for words to search, separated by comma
+    // Prompt user for words to search, separated by spaces
     std::string inputWords;
-    std::cout << "Enter words to search for, separated by a comma (','): ";
+    std::cout << "Please enter the word(s) you wish to search for, separated by spaces: ";
     std::cin.ignore();
     std::getline(std::cin, inputWords);
 
     // Tokenize the input words and search each word
     std::istringstream iss(inputWords);
     std::string word;
-    while (std::getline(iss, word, ',')) {
-        word.erase(std::remove(word.begin(), word.end(), ' '), word.end()); // Remove any whitespace
+    while (iss >> word) {
+        // Convert word to lowercase to match the data
+        std::transform(word.begin(), word.end(), word.begin(),
+            [](unsigned char c) { return std::tolower(c); });
+
         int token_length = word.length();
 
         char* d_token;
@@ -124,7 +128,7 @@ int main()
         cudaEventRecord(start);
         int threadsPerBlock = 256;
         int blocksPerGrid = (data_size + threadsPerBlock - 1) / threadsPerBlock;
-        count_token_occurrences<<<blocksPerGrid, threadsPerBlock>>>(d_data, data_size, d_token, token_length, d_count);
+        count_token_occurrences << <blocksPerGrid, threadsPerBlock >> > (d_data, data_size, d_token, token_length, d_count);
         cudaEventRecord(stop);
         cudaEventSynchronize(stop);
 
@@ -136,8 +140,8 @@ int main()
 
         // Output results
         std::cout << "Word: " << word << "\n"
-                  << "Occurrences: " << occurrences << "\n"
-                  << "Time taken: " << elapsedTime << " ms\n\n";
+            << "Occurrences: " << occurrences << "\n"
+            << "Time taken: " << elapsedTime << " ms\n\n";
 
         // Free resources for this word
         cudaEventDestroy(start);
