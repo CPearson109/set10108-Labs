@@ -7,6 +7,7 @@
 #include <string>
 #include <sstream>
 #include <set>
+#include <limits>
 
 // Function to read the entire content of a file into a vector<char>
 std::vector<char> read_file(const char* filename)
@@ -88,6 +89,7 @@ std::string to_lowercase(const std::string& str)
 
 int main()
 {
+
     // Define dataset folder
     std::string dataset_folder = "dataset";
 
@@ -148,6 +150,11 @@ int main()
         std::cout << "Found " << occurrences << " occurrences of word: " << word
             << " in " << duration.count()*1000 << " milliseconds." << std::endl;
     }
+
+    // Wait for user input before closing
+    std::cout << "Press Enter to exit...";
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    std::cin.get();
 
     return 0;
 }

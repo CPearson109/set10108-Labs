@@ -242,5 +242,10 @@ int main()
     // Clean up
     cudaFree(d_data);
 
+    // Wait for user input before closing
+    std::cout << "Press Enter to exit...";
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    std::cin.get();
+
     return 0;
 }

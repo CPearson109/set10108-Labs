@@ -6,6 +6,7 @@
 #include <cstring>
 #include <filesystem>
 #include <sstream>
+#include <limits>
 
 // Function to read the file and convert its content to lowercase
 std::vector<char> read_file(const std::string& filename)
@@ -152,6 +153,11 @@ int main()
 
     // Free device memory
     cudaFree(d_data);
+
+    // Wait for user input before closing
+    std::cout << "Press Enter to exit...";
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    std::cin.get();
 
     return 0;
 }
