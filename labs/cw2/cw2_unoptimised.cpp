@@ -10,6 +10,7 @@
 #include <future>
 #include <iostream>
 #include <fstream>
+#include <chrono> // For performance timings
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
@@ -42,7 +43,8 @@ std::vector<rgba_t> load_rgb(const char* filename, int& width, int& height)
 }
 
 // Conversion to color temperature
-double rgbToColorTemperature(rgba_t rgba) {
+double rgbToColorTemperature(const rgba_t& rgba)
+{
     // Normalize RGB values to [0, 1]
     double red = rgba.r / 255.0;
     double green = rgba.g / 255.0;
@@ -67,6 +69,18 @@ double rgbToColorTemperature(rgba_t rgba) {
     double CCT = 449.0 * n * n * n + 3525.0 * n * n + 6823.3 * n + 5520.33;
 
     return CCT;
+}
+
+// Clear contents of a folder
+void clear_folder(const fs::path& folder)
+{
+    if (fs::exists(folder) && fs::is_directory(folder))
+    {
+        for (const auto& entry : fs::directory_iterator(folder))
+        {
+            fs::remove_all(entry);
+        }
+    }
 }
 
 // Calculate the median color temperature from an image filename
@@ -108,27 +122,40 @@ int main()
 
     // Paths for source and destination folders
     const fs::path source_folder = "images/unsorted";
-    const fs::path sorted_folder = "images/sorted";
+    const fs::path sorted_folder = "cw2_unoptimised_sorted";
 
-    // Check if source directory exists
-    if (!fs::is_directory(source_folder))
+    // Create source directory if it doesn't exist
+    if (!fs::exists(source_folder))
     {
-        std::cerr << "Directory \"" << source_folder << "\" not found: please make sure it exists." << std::endl;
-        return -1;
+        try
+        {
+            fs::create_directories(source_folder);
+            std::cout << "Created source directory: " << source_folder << std::endl;
+        }
+        catch (const fs::filesystem_error& e)
+        {
+            std::cerr << "Error creating source directory: " << e.what() << std::endl;
+            return -1;
+        }
     }
 
-    // Create sorted directory if it doesn't exist
+    // Create or clear sorted directory
     if (!fs::exists(sorted_folder))
     {
         try
         {
             fs::create_directories(sorted_folder);
+            std::cout << "Created sorted directory: " << sorted_folder << std::endl;
         }
         catch (const fs::filesystem_error& e)
         {
             std::cerr << "Error creating sorted directory: " << e.what() << std::endl;
             return -1;
         }
+    }
+    else
+    {
+        clear_folder(sorted_folder);
     }
 
     // Load image filenames from source folder
@@ -141,6 +168,12 @@ int main()
         }
     }
 
+    if (imageFilenames.empty())
+    {
+        std::cerr << "No images found in the source directory." << std::endl;
+        return -1;
+    }
+
     // Multi-threaded sorting setup
     std::mutex filenamesMutex;
     std::atomic<bool> sortingComplete(false);
@@ -148,68 +181,88 @@ int main()
 
     // Start the sorting and copying in a separate thread
     std::thread sortingThread([&]() {
+        auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
+
         // Copy imageFilenames under mutex protection
         std::vector<std::string> filenamesCopy;
-    {
-        std::lock_guard<std::mutex> lock(filenamesMutex);
-        filenamesCopy = imageFilenames; // make a copy
-    }
-
-    // Compute median color temperatures in parallel
-    std::vector<std::future<std::pair<std::string, double>>> futures;
-    for (const auto& filename : filenamesCopy)
-    {
-        futures.emplace_back(std::async(std::launch::async, [filename]() {
-            double median = filename_to_median(filename);
-        return std::make_pair(filename, median);
-            }));
-    }
-
-    // Collect the results
-    std::vector<std::pair<std::string, double>> filenameMedianPairs;
-    for (auto& future : futures)
-    {
-        filenameMedianPairs.push_back(future.get());
-    }
-
-    // Sort the filenames based on median color temperature (hottest to coldest)
-    std::sort(filenameMedianPairs.begin(), filenameMedianPairs.end(),
-        [](const auto& lhs, const auto& rhs) {
-            return lhs.second > rhs.second; // Note the '>' for hottest to coldest
-        });
-
-    // Copy and rename the images into the sorted folder
-    int index = 1;
-    for (const auto& pair : filenameMedianPairs)
-    {
-        fs::path sourceFile = pair.first;
-        fs::path destinationFile = sorted_folder / (std::to_string(index) + sourceFile.extension().string());
-        try
         {
-            fs::copy_file(sourceFile, destinationFile, fs::copy_options::overwrite_existing);
+            std::lock_guard<std::mutex> lock(filenamesMutex);
+            filenamesCopy = imageFilenames; // make a copy
         }
-        catch (const fs::filesystem_error& e)
+
+        // Compute median color temperatures in parallel
+        std::vector<std::future<std::pair<std::string, double>>> futures;
+        for (const auto& filename : filenamesCopy)
         {
-            std::cerr << "Error copying file " << sourceFile << ": " << e.what() << std::endl;
+            futures.emplace_back(std::async(std::launch::async, [filename]() {
+                double median = filename_to_median(filename);
+                return std::make_pair(filename, median);
+                }));
         }
-        ++index;
-    }
 
-    // Update the sorted filenames
-    std::vector<std::string> sorted;
-    for (int i = 1; i < index; ++i)
-    {
-        fs::path filePath = sorted_folder / (std::to_string(i) + ".jpg");
-        if (fs::exists(filePath))
-            sorted.push_back(filePath.string());
-    }
+        // Collect the results
+        std::vector<std::pair<std::string, double>> filenameMedianPairs;
+        for (auto& future : futures)
+        {
+            filenameMedianPairs.push_back(future.get());
+        }
 
-    // Update the shared sortedFilenames under mutex protection
-    {
-        std::lock_guard<std::mutex> lock(filenamesMutex);
-        sortedFilenames = std::move(sorted);
-    }
-    sortingComplete = true; // Indicate that sorting is complete
+        // Sort the filenames based on median color temperature (hottest to coldest)
+        std::sort(filenameMedianPairs.begin(), filenameMedianPairs.end(),
+            [](const auto& lhs, const auto& rhs) {
+                return lhs.second > rhs.second; // '>' for hottest to coldest
+            });
+
+        // Copy and rename the images into the sorted folder
+        int index = 1;
+        for (const auto& pair : filenameMedianPairs)
+        {
+            fs::path sourceFile = pair.first;
+            fs::path destinationFile = sorted_folder / (std::to_string(index) + sourceFile.extension().string());
+            try
+            {
+                fs::copy_file(sourceFile, destinationFile, fs::copy_options::overwrite_existing);
+            }
+            catch (const fs::filesystem_error& e)
+            {
+                std::cerr << "Error copying file " << sourceFile << ": " << e.what() << std::endl;
+            }
+            ++index;
+        }
+
+        // Update the sorted filenames
+        std::vector<std::string> sorted;
+        for (int i = 1; i < index; ++i)
+        {
+            fs::path filePath = sorted_folder / (std::to_string(i) + ".jpg");
+            if (fs::exists(filePath))
+                sorted.push_back(filePath.string());
+            else
+            {
+                // Try other common image extensions
+                for (const auto& ext : { ".png", ".jpeg", ".bmp", ".gif" })
+                {
+                    filePath = sorted_folder / (std::to_string(i) + ext);
+                    if (fs::exists(filePath))
+                    {
+                        sorted.push_back(filePath.string());
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Update the shared sortedFilenames under mutex protection
+        {
+            std::lock_guard<std::mutex> lock(filenamesMutex);
+            sortedFilenames = std::move(sorted);
+        }
+        sortingComplete = true; // Indicate that sorting is complete
+
+        auto end_time = std::chrono::high_resolution_clock::now(); // End timing
+        std::cout << "Sorting and copying took "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count()
+            << " milliseconds." << std::endl;
         });
 
     // Define some constants
@@ -223,28 +276,9 @@ int main()
         sf::Style::Titlebar | sf::Style::Close);
     window.setVerticalSyncEnabled(true);
 
-    // Load the initial image (wait until sorting is complete)
     sf::Texture texture;
-    while (!sortingComplete)
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-
-    // Update imageFilenames from sortedFilenames
-    {
-        std::lock_guard<std::mutex> lock(filenamesMutex);
-        imageFilenames = sortedFilenames;
-    }
-
-    // Load the first image from the sorted folder
-    if (!texture.loadFromFile(imageFilenames[imageIndex]))
-    {
-        std::cerr << "Failed to load image: " << imageFilenames[imageIndex] << std::endl;
-        return EXIT_FAILURE;
-    }
-    sf::Sprite sprite(texture);
-    sprite.setScale(SpriteScaleFromDimensions(texture.getSize(), gameWidth, gameHeight));
-    window.setTitle(imageFilenames[imageIndex]);
+    sf::Sprite sprite;
+    bool imageLoaded = false;
 
     while (window.isOpen())
     {
@@ -272,17 +306,17 @@ int main()
             // Arrow key handling
             if (event.type == sf::Event::KeyPressed)
             {
-                if (event.key.code == sf::Keyboard::Left || event.key.code == sf::Keyboard::Right)
+                if ((event.key.code == sf::Keyboard::Left || event.key.code == sf::Keyboard::Right) && sortingComplete)
                 {
                     std::lock_guard<std::mutex> lock(filenamesMutex);
                     // Adjust the image index
                     if (event.key.code == sf::Keyboard::Left)
-                        imageIndex = (imageIndex + imageFilenames.size() - 1) % imageFilenames.size();
+                        imageIndex = (imageIndex + sortedFilenames.size() - 1) % sortedFilenames.size();
                     else if (event.key.code == sf::Keyboard::Right)
-                        imageIndex = (imageIndex + 1) % imageFilenames.size();
+                        imageIndex = (imageIndex + 1) % sortedFilenames.size();
 
                     // Get image filename
-                    const auto& imageFilename = imageFilenames[imageIndex];
+                    const auto& imageFilename = sortedFilenames[imageIndex];
                     // Set it as the window title
                     window.setTitle(imageFilename);
                     // Load the appropriate texture and update the sprite
@@ -290,6 +324,7 @@ int main()
                     {
                         sprite = sf::Sprite(texture);
                         sprite.setScale(SpriteScaleFromDimensions(texture.getSize(), gameWidth, gameHeight));
+                        imageLoaded = true;
                     }
                     else
                     {
@@ -301,8 +336,35 @@ int main()
 
         // Clear the window
         window.clear(sf::Color(0, 0, 0));
-        // Draw the sprite
-        window.draw(sprite);
+
+        if (sortingComplete)
+        {
+            if (!imageLoaded)
+            {
+                // Load the initial image
+                std::lock_guard<std::mutex> lock(filenamesMutex);
+                imageFilenames = sortedFilenames; // Correctly update imageFilenames
+                if (!imageFilenames.empty())
+                {
+                    const auto& imageFilename = imageFilenames[imageIndex];
+                    if (texture.loadFromFile(imageFilename))
+                    {
+                        sprite = sf::Sprite(texture);
+                        sprite.setScale(SpriteScaleFromDimensions(texture.getSize(), gameWidth, gameHeight));
+                        window.setTitle(imageFilename);
+                        imageLoaded = true;
+                    }
+                    else
+                    {
+                        std::cerr << "Failed to load image: " << imageFilename << std::endl;
+                    }
+                }
+            }
+            // Draw the sprite
+            if (imageLoaded)
+                window.draw(sprite);
+        }
+
         // Display things on screen
         window.display();
     }
