@@ -8,18 +8,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 enable_language(CUDA)
 
 # Specify CUDA architectures to target
-# Adjust these based on your GPU. Common architectures:
-# 60: Pascal, 61: Pascal, 75: Turing, 86: Ampere, 89: Hopper
-set(CMAKE_CUDA_ARCHITECTURES 75 86)
+set(CMAKE_CUDA_ARCHITECTURES 61)
 
 # Include directories
-include_directories("${CMAKE_SOURCE_DIR}/../contrib")
-include_directories("${CMAKE_SOURCE_DIR}/../contrib/sfml/include")
-include_directories("${CMAKE_SOURCE_DIR}/../contrib/stb") # Assuming stb_image.h is here
+include_directories(
+    "${CMAKE_SOURCE_DIR}/../contrib"
+    "${CMAKE_SOURCE_DIR}/../contrib/sfml/include"
+    "${CMAKE_SOURCE_DIR}/../contrib/stb" # Assuming stb_image.h is here
+)
 
 # Link directories for SFML
-link_directories("${CMAKE_SOURCE_DIR}/../contrib/sfml/lib/Debug")
-link_directories("${CMAKE_SOURCE_DIR}/../contrib/sfml/lib/Release")
+link_directories(
+    "${CMAKE_SOURCE_DIR}/../contrib/sfml/lib/Debug"
+    "${CMAKE_SOURCE_DIR}/../contrib/sfml/lib/Release"
+)
 
 # Find SFML for non-Windows systems
 if (NOT WIN32)
@@ -29,7 +31,7 @@ if (NOT WIN32)
     endif()
 endif()
 
-# Add executable
+# Add executable with C++ and CUDA source files
 add_executable(cw2_main cw2_main.cpp colour_temperature.cu)
 
 # Link libraries

@@ -23,7 +23,10 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
-// Define the RGBA structure before its usage
+// Include OpenMP for parallelization
+#include <omp.h>
+
+// Define the RGBA structure to match the C++ definition
 struct rgba_t {
     uint8_t r;
     uint8_t g;
@@ -31,8 +34,8 @@ struct rgba_t {
     uint8_t a;
 };
 
-// Include the CUDA function declaration after defining rgba_t
-extern "C" bool computeColorTemperaturesCUDA(const rgba_t* h_images, double* h_temperatures, int total_pixels);
+// Declare the CUDA function with C linkage
+extern "C" bool computeColorTemperaturesCUDA(const rgba_t * h_images, double* h_temperatures, int total_pixels);
 
 namespace fs = std::filesystem;
 
@@ -87,7 +90,7 @@ inline ThreadPool::ThreadPool(size_t threads)
                     task();
                 }
             }
-        );
+            );
 }
 
 // Enqueue method implementation
@@ -256,17 +259,17 @@ std::vector<std::string> multiThreadedCPUAsync(const std::vector<std::pair<std::
                 return { filename, 0.0 };
             }
 
-            // Compute color temperatures
-            std::vector<double> temperatures;
-            temperatures.reserve(rgbadata.size());
-            for (const auto& pixel : rgbadata)
-            {
-                temperatures.push_back(rgbToColorTemperature(pixel));
-            }
+        // Compute color temperatures
+        std::vector<double> temperatures;
+        temperatures.reserve(rgbadata.size());
+        for (const auto& pixel : rgbadata)
+        {
+            temperatures.push_back(rgbToColorTemperature(pixel));
+        }
 
-            // Compute median
-            double median = calculate_median(temperatures);
-            return { filename, median };
+        // Compute median
+        double median = calculate_median(temperatures);
+        return { filename, median };
             }));
     }
 
@@ -317,17 +320,17 @@ std::vector<std::string> multiThreadedCPUThreadPool(const std::vector<std::pair<
                 return { filename, 0.0 };
             }
 
-            // Compute color temperatures
-            std::vector<double> temperatures;
-            temperatures.reserve(rgbadata.size());
-            for (const auto& pixel : rgbadata)
-            {
-                temperatures.push_back(rgbToColorTemperature(pixel));
-            }
+        // Compute color temperatures
+        std::vector<double> temperatures;
+        temperatures.reserve(rgbadata.size());
+        for (const auto& pixel : rgbadata)
+        {
+            temperatures.push_back(rgbToColorTemperature(pixel));
+        }
 
-            // Compute median
-            double median = calculate_median(temperatures);
-            return { filename, median };
+        // Compute median
+        double median = calculate_median(temperatures);
+        return { filename, median };
             }));
     }
 
@@ -371,24 +374,76 @@ std::vector<std::string> parallelCPUStandardLibrary(const std::vector<std::pair<
     std::transform(std::execution::par, loadedImages.begin(), loadedImages.end(), filename_medians.begin(),
         [&](const std::pair<std::string, std::vector<rgba_t>>& pair) -> std::pair<std::string, double> {
             const std::string& filename = pair.first;
-            const std::vector<rgba_t>& rgbadata = pair.second;
+    const std::vector<rgba_t>& rgbadata = pair.second;
 
-            double median = 0.0;
-            if (!rgbadata.empty()) {
-                std::vector<double> temperatures(rgbadata.size());
+    double median = 0.0;
+    if (!rgbadata.empty()) {
+        std::vector<double> temperatures(rgbadata.size());
 
-                // Compute color temperatures using parallel transform
-                std::transform(std::execution::par, rgbadata.begin(), rgbadata.end(), temperatures.begin(),
-                    [&](const rgba_t& pixel) -> double {
-                        return rgbToColorTemperature(pixel);
-                    });
+        // Compute color temperatures using parallel transform
+        std::transform(std::execution::par, rgbadata.begin(), rgbadata.end(), temperatures.begin(),
+            [&](const rgba_t& pixel) -> double {
+                return rgbToColorTemperature(pixel);
+            });
 
-                // Compute median
-                median = calculate_median(temperatures);
-            }
+        // Compute median
+        median = calculate_median(temperatures);
+    }
 
-            return { filename, median };
+    return { filename, median };
         });
+
+    // Sort based on median
+    std::sort(std::execution::par, filename_medians.begin(), filename_medians.end(),
+        [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) -> bool {
+            return a.second < b.second;
+        });
+
+    // Extract sorted filenames
+    std::vector<std::string> sortedFilenames;
+    sortedFilenames.reserve(filename_medians.size());
+    for (const auto& pair : filename_medians)
+    {
+        sortedFilenames.push_back(pair.first);
+    }
+
+    auto end = std::chrono::high_resolution_clock::now();
+    duration = std::chrono::duration<double>(end - start).count();
+
+    return sortedFilenames;
+}
+
+// Function to process images using CUDA
+std::vector<std::string> multiThreadedCPUCUDAMethod(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
+{
+    auto start = std::chrono::high_resolution_clock::now();
+
+    std::vector<std::pair<std::string, double>> filename_medians;
+    filename_medians.reserve(loadedImages.size());
+
+    for (const auto& pair : loadedImages)
+    {
+        const auto& filename = pair.first;
+        const auto& rgbadata = pair.second;
+
+        if (rgbadata.empty()) {
+            filename_medians.emplace_back(filename, 0.0);
+            continue;
+        }
+
+        int total_pixels = static_cast<int>(rgbadata.size());
+        std::vector<double> temperatures(total_pixels);
+
+        bool success = computeColorTemperaturesCUDA(rgbadata.data(), temperatures.data(), total_pixels);
+        if (!success) {
+            std::cerr << "CUDA processing failed for image: " << filename << std::endl;
+            filename_medians.emplace_back(filename, 0.0);
+            continue;
+        }
+
+        double median = calculate_median(temperatures);
+        filename_medians.emplace_back(filename, median);
+    }
 
     // Sort based on median
     std::sort(filename_medians.begin(), filename_medians.end(),
@@ -410,71 +465,104 @@ std::vector<std::string> parallelCPUStandardLibrary(const std::vector<std::pair<
     return sortedFilenames;
 }
 
-// Function to process images using C++17 Parallel Algorithms for GPU
-std::vector<std::string> parallelGPUStandardLibrary(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
+// Function to process images using OpenMP for multi-threading
+std::vector<std::string> openMPCPU(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
 {
     auto start = std::chrono::high_resolution_clock::now();
 
-    // Flatten all image data for CUDA processing
-    std::vector<rgba_t> all_pixels;
-    all_pixels.reserve(loadedImages.size() * 1000); // Adjust based on expected image sizes
-    std::vector<int> image_pixel_counts;
-    image_pixel_counts.reserve(loadedImages.size());
+    std::vector<std::pair<std::string, double>> filename_medians;
+    filename_medians.reserve(loadedImages.size());
 
-    for (const auto& pair : loadedImages)
+    // Parallelize the outer loop over images
+#pragma omp parallel for schedule(dynamic)
+    for (size_t i = 0; i < loadedImages.size(); ++i)
     {
-        if (pair.second.empty()) {
-            image_pixel_counts.emplace_back(0);
-            continue;
-        }
-        image_pixel_counts.emplace_back(static_cast<int>(pair.second.size()));
-        all_pixels.insert(all_pixels.end(), pair.second.begin(), pair.second.end());
-    }
+        const auto& filename = loadedImages[i].first;
+        const auto& rgbadata = loadedImages[i].second;
 
-    // Compute color temperatures using CUDA
-    std::vector<double> all_temperatures(all_pixels.size(), 0.0);
-    bool success_cuda = computeColorTemperaturesCUDA(all_pixels.data(), all_temperatures.data(), static_cast<int>(all_pixels.size()));
-    if (!success_cuda)
-    {
-        std::cerr << "CUDA-based color temperature computation failed." << std::endl;
-        return {};
-    }
+        double median = 0.0;
 
-    // Precompute starting indices
-    std::vector<int> starting_indices(loadedImages.size(), 0);
-    for (size_t i = 1; i < loadedImages.size(); ++i)
-    {
-        starting_indices[i] = starting_indices[i - 1] + image_pixel_counts[i - 1];
-    }
+        if (!rgbadata.empty()) {
+            std::vector<double> temperatures;
+            temperatures.reserve(rgbadata.size());
 
-    // Compute medians using std::transform with parallel execution
-    std::vector<std::pair<std::string, double>> filename_medians(loadedImages.size());
-
-    std::transform(std::execution::par, loadedImages.begin(), loadedImages.end(), filename_medians.begin(),
-        [&](const std::pair<std::string, std::vector<rgba_t>>& pair) -> std::pair<std::string, double> {
-            const std::string& filename = pair.first;
-            const std::vector<rgba_t>& rgbadata = pair.second;
-
-            double median = 0.0;
-            if (!rgbadata.empty()) {
-                // Find the starting index for this image
-                size_t index = &pair - &loadedImages[0]; // Get the current index
-
-                int start = starting_indices[index];
-                int img_size = image_pixel_counts[index];
-
-                // Extract the temperatures for this image
-                std::vector<double> temperatures(all_temperatures.begin() + start, all_temperatures.begin() + start + img_size);
-
-                // Compute median
-                median = calculate_median(temperatures);
+            // Compute color temperatures
+            for (const auto& pixel : rgbadata)
+            {
+                temperatures.push_back(rgbToColorTemperature(pixel));
             }
 
-            return { filename, median };
+            // Compute median
+            median = calculate_median(temperatures);
+        }
+
+        // Protect the shared resource with a critical section
+#pragma omp critical
+        {
+            filename_medians.emplace_back(filename, median);
+        }
+    }
+
+    // Sort based on median using C++17 Parallel Algorithms
+    std::sort(std::execution::par, filename_medians.begin(), filename_medians.end(),
+        [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) -> bool {
+            return a.second < b.second;
         });
 
-    // Sort based on median
-    std::sort(filename_medians.begin(), filename_medians.end(),
+    // Extract sorted filenames
+    std::vector<std::string> sortedFilenames;
+    sortedFilenames.reserve(filename_medians.size());
+    for (const auto& pair : filename_medians)
+    {
+        sortedFilenames.push_back(pair.first);
+    }
+
+    auto end = std::chrono::high_resolution_clock::now();
+    duration = std::chrono::duration<double>(end - start).count();
+
+    return sortedFilenames;
+}
+
+// Function to process images using SIMD instructions
+std::vector<std::string> simdCPU(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
+{
+    auto start = std::chrono::high_resolution_clock::now();
+
+    std::vector<std::pair<std::string, double>> filename_medians;
+    filename_medians.reserve(loadedImages.size());
+
+    // Parallelize the outer loop over images using OpenMP
+#pragma omp parallel for schedule(dynamic)
+    for (size_t i = 0; i < loadedImages.size(); ++i)
+    {
+        const auto& filename = loadedImages[i].first;
+        const auto& rgbadata = loadedImages[i].second;
+
+        double median = 0.0;
+
+        if (!rgbadata.empty()) {
+            std::vector<double> temperatures(rgbadata.size());
+
+            // Compute color temperatures using OpenMP SIMD directives
+#pragma omp simd
+            for (size_t j = 0; j < rgbadata.size(); ++j)
+            {
+                temperatures[j] = rgbToColorTemperature(rgbadata[j]);
+            }
+
+            // Compute median
+            median = calculate_median(temperatures);
+        }
+
+        // Protect the shared resource with a critical section
+#pragma omp critical
+        {
+            filename_medians.emplace_back(filename, median);
+        }
+    }
+
+    // Sort based on median using C++17 Parallel Algorithms
+    std::sort(std::execution::par, filename_medians.begin(), filename_medians.end(),
         [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) -> bool {
             return a.second < b.second;
         });
@@ -527,8 +615,8 @@ int main()
     {
         futures_load.emplace_back(pool.enqueue([filename]() -> std::pair<std::string, std::vector<rgba_t>> {
             int width, height;
-            auto rgbadata = load_rgb(filename, width, height);
-            return { filename, std::move(rgbadata) };
+        auto rgbadata = load_rgb(filename, width, height);
+        return { filename, std::move(rgbadata) };
             }));
     }
 
@@ -544,15 +632,19 @@ int main()
     std::vector<std::string> sortedFilenames_single;
     std::vector<std::string> sortedFilenames_async;
     std::vector<std::string> sortedFilenames_pool;
-    std::vector<std::string> sortedFilenames_parallel_cpu;
-    std::vector<std::string> sortedFilenames_parallel_gpu; // New container for C++17 Parallel Algorithms GPU
+    std::vector<std::string> sortedFilenames_parallel_cpu; // C++17 Parallel Algorithms CPU
+    std::vector<std::string> sortedFilenames_cuda; // CUDA
+    std::vector<std::string> sortedFilenames_openmp; // OpenMP
+    std::vector<std::string> sortedFilenames_simd; // SIMD
 
     // Containers to hold durations
     double duration_single = 0.0;
     double duration_async = 0.0;
     double duration_pool = 0.0;
-    double duration_parallel_cpu = 0.0;
-    double duration_parallel_gpu = 0.0; // New duration for C++17 Parallel Algorithms GPU
+    double duration_parallel_cpu = 0.0; // C++17 Parallel Algorithms CPU
+    double duration_cuda = 0.0; // CUDA
+    double duration_openmp = 0.0; // OpenMP
+    double duration_simd = 0.0; // SIMD
 
     // Single-Threaded CPU Sort
     sortedFilenames_single = singleThreadedCPU(loadedImages, duration_single);
@@ -570,14 +662,68 @@ int main()
     sortedFilenames_parallel_cpu = parallelCPUStandardLibrary(loadedImages, duration_parallel_cpu);
     std::cout << "C++17 Parallel Algorithms CPU Sort Time: " << duration_parallel_cpu << " seconds" << std::endl;
 
-    // C++17 Parallel Algorithms-Based GPU Sort
-    sortedFilenames_parallel_gpu = parallelGPUStandardLibrary(loadedImages, duration_parallel_gpu);
-    std::cout << "C++17 Parallel Algorithms GPU Sort Time: " << duration_parallel_gpu << " seconds" << std::endl;
+    // GPU-Accelerated CPU Sort using CUDA
+    sortedFilenames_cuda = multiThreadedCPUCUDAMethod(loadedImages, duration_cuda);
+    std::cout << "GPU-Accelerated CPU Sort using CUDA Time: " << duration_cuda << " seconds" << std::endl;
+
+    // OpenMP-Based CPU Sort
+    sortedFilenames_openmp = openMPCPU(loadedImages, duration_openmp);
+    std::cout << "OpenMP-Based CPU Sort Time: " << duration_openmp << " seconds" << std::endl;
+
+    // SIMD-Based CPU Sort
+    sortedFilenames_simd = simdCPU(loadedImages, duration_simd);
+    std::cout << "SIMD-Based CPU Sort Time: " << duration_simd << " seconds" << std::endl;
 
     // Determine the fastest method to display (optional)
-    // For demonstration, let's choose the Parallel GPU sorted list
-    // You can change this to any of the sortedFilenames_* vectors based on your preference
-    std::vector<std::string> imageFilenames_sorted = sortedFilenames_parallel_gpu;
+    // For demonstration, let's choose the fastest sorted list
+    // You can implement logic to select based on minimum duration
+    double min_duration = duration_single;
+    std::vector<std::string>* fastest_sorted_filenames = &sortedFilenames_single;
+
+    if (duration_async < min_duration) {
+        min_duration = duration_async;
+        fastest_sorted_filenames = &sortedFilenames_async;
+    }
+    if (duration_pool < min_duration) {
+        min_duration = duration_pool;
+        fastest_sorted_filenames = &sortedFilenames_pool;
+    }
+    if (duration_parallel_cpu < min_duration) {
+        min_duration = duration_parallel_cpu;
+        fastest_sorted_filenames = &sortedFilenames_parallel_cpu;
+    }
+    if (duration_cuda < min_duration) {
+        min_duration = duration_cuda;
+        fastest_sorted_filenames = &sortedFilenames_cuda;
+    }
+    if (duration_openmp < min_duration) {
+        min_duration = duration_openmp;
+        fastest_sorted_filenames = &sortedFilenames_openmp;
+    }
+    if (duration_simd < min_duration) {
+        min_duration = duration_simd;
+        fastest_sorted_filenames = &sortedFilenames_simd;
+    }
+
+    std::cout << "\nFastest Method: ";
+
+    if (fastest_sorted_filenames == &sortedFilenames_single)
+        std::cout << "Single-Threaded CPU" << std::endl;
+    else if (fastest_sorted_filenames == &sortedFilenames_async)
+        std::cout << "Multi-Threaded CPU using std::async" << std::endl;
+    else if (fastest_sorted_filenames == &sortedFilenames_pool)
+        std::cout << "Multi-Threaded CPU using ThreadPool" << std::endl;
+    else if (fastest_sorted_filenames == &sortedFilenames_parallel_cpu)
+        std::cout << "C++17 Parallel Algorithms CPU" << std::endl;
+    else if (fastest_sorted_filenames == &sortedFilenames_cuda)
+        std::cout << "GPU-Accelerated CUDA" << std::endl;
+    else if (fastest_sorted_filenames == &sortedFilenames_openmp)
+        std::cout << "OpenMP-Based CPU" << std::endl;
+    else if (fastest_sorted_filenames == &sortedFilenames_simd)
+        std::cout << "SIMD-Based CPU" << std::endl;
+
+    // Choose the fastest sorted list for display
+    std::vector<std::string> imageFilenames_sorted = *fastest_sorted_filenames;
 
     // Define some constants
     const int gameWidth = 800;
@@ -604,7 +750,7 @@ int main()
         float scaleY = static_cast<float>(screenHeight) / static_cast<float>(textureSize.y);
         float scale = std::min(scaleX, scaleY);
         return { scale, scale };
-        };
+    };
     sprite.setScale(SpriteScaleFromDimensions(texture.getSize(), gameWidth, gameHeight));
 
     // Main loop
