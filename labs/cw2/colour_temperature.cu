@@ -11,8 +11,8 @@ struct rgba_t {
     uint8_t a;
 };
 
-// Optimized Kernel
-__global__ void computeColorTemperaturesKernel(const rgba_t* __restrict__ d_images, float* __restrict__ d_temperatures, int total_pixels) {
+// Optimized Kernel using double precision
+__global__ void computeColorTemperaturesKernel(const rgba_t* __restrict__ d_images, double* __restrict__ d_temperatures, int total_pixels) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total_pixels) return;
 
@@ -20,38 +20,42 @@ __global__ void computeColorTemperaturesKernel(const rgba_t* __restrict__ d_imag
     rgba_t pixel = d_images[idx];
 
     // Compute color temperature
-    float red = pixel.r / 255.0f;
-    float green = pixel.g / 255.0f;
-    float blue = pixel.b / 255.0f;
+    double red = pixel.r / 255.0;
+    double green = pixel.g / 255.0;
+    double blue = pixel.b / 255.0;
 
-    red = (red > 0.04045f) ? powf((red + 0.055f) / 1.055f, 2.4f) : (red / 12.92f);
-    green = (green > 0.04045f) ? powf((green + 0.055f) / 1.055f, 2.4f) : (green / 12.92f);
-    blue = (blue > 0.04045f) ? powf((blue + 0.055f) / 1.055f, 2.4f) : (blue / 12.92f);
+    // Apply gamma correction
+    red = (red > 0.04045) ? pow((red + 0.055) / 1.055, 2.4) : (red / 12.92);
+    green = (green > 0.04045) ? pow((green + 0.055) / 1.055, 2.4) : (green / 12.92);
+    blue = (blue > 0.04045) ? pow((blue + 0.055) / 1.055, 2.4) : (blue / 12.92);
 
-    float X = red * 0.4124f + green * 0.3576f + blue * 0.1805f;
-    float Y = red * 0.2126f + green * 0.7152f + blue * 0.0722f;
-    float Z = red * 0.0193f + green * 0.1192f + blue * 0.9505f;
+    // Convert to XYZ color space
+    double X = red * 0.4124 + green * 0.3576 + blue * 0.1805;
+    double Y = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+    double Z = red * 0.0193 + green * 0.1192 + blue * 0.9505;
 
-    float denominator = X + Y + Z;
-    if (denominator == 0.0f) {
-        d_temperatures[idx] = 0.0f;
+    // Calculate chromaticity coordinates
+    double denominator = X + Y + Z;
+    if (denominator == 0.0) {
+        d_temperatures[idx] = 0.0;
         return;
     }
 
-    float x = X / denominator;
-    float y = Y / denominator;
+    double x = X / denominator;
+    double y = Y / denominator;
 
-    float n = (x - 0.3320f) / (0.1858f - y);
-    float CCT = 449.0f * n * n * n + 3525.0f * n * n + 6823.3f * n + 5520.33f;
+    // Approximate color temperature using McCamy's formula
+    double n = (x - 0.3320) / (0.1858 - y);
+    double CCT = 449.0 * pow(n, 3) + 3525.0 * pow(n, 2) + 6823.3 * n + 5520.33;
 
     d_temperatures[idx] = CCT;
 }
 
 // Host function to compute color temperatures using CUDA
-extern "C" bool computeColorTemperaturesCUDA(const rgba_t * h_images, float* h_temperatures, int total_pixels) {
+extern "C" bool computeColorTemperaturesCUDA(const rgba_t * h_images, double* h_temperatures, int total_pixels) {
     // Allocate device memory
     rgba_t* d_images = nullptr;
-    float* d_temperatures_device = nullptr;
+    double* d_temperatures_device = nullptr;
     cudaError_t err;
 
     err = cudaMalloc((void**)&d_images, total_pixels * sizeof(rgba_t));
@@ -60,7 +64,7 @@ extern "C" bool computeColorTemperaturesCUDA(const rgba_t * h_images, float* h_t
         return false;
     }
 
-    err = cudaMalloc((void**)&d_temperatures_device, total_pixels * sizeof(float));
+    err = cudaMalloc((void**)&d_temperatures_device, total_pixels * sizeof(double));
     if (err != cudaSuccess) {
         std::cerr << "CUDA malloc failed for temperatures: " << cudaGetErrorString(err) << std::endl;
         cudaFree(d_images);
@@ -109,7 +113,7 @@ extern "C" bool computeColorTemperaturesCUDA(const rgba_t * h_images, float* h_t
     }
 
     // Copy temperatures back to host asynchronously
-    err = cudaMemcpyAsync(h_temperatures, d_temperatures_device, total_pixels * sizeof(float), cudaMemcpyDeviceToHost, stream);
+    err = cudaMemcpyAsync(h_temperatures, d_temperatures_device, total_pixels * sizeof(double), cudaMemcpyDeviceToHost, stream);
     if (err != cudaSuccess) {
         std::cerr << "CUDA memcpy D2H failed: " << cudaGetErrorString(err) << std::endl;
         cudaFree(d_images);

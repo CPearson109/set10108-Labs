@@ -1,4 +1,5 @@
 // cw2_main.cpp
+
 #include <SFML/Graphics.hpp>
 #include <cmath>
 #include <ctime>
@@ -9,7 +10,6 @@
 #include <algorithm>
 #include <future>
 #include <mutex>
-#include <map>
 #include <iostream>
 #include <chrono>
 #include <queue>
@@ -99,7 +99,7 @@ auto ThreadPool::enqueue(F f) -> std::future<typename std::result_of<F()>::type>
 {
     using return_type = typename std::result_of<F()>::type;
 
-    auto task = std::make_shared< std::packaged_task<return_type()> >(f);
+    auto task = std::make_shared<std::packaged_task<return_type()>>(f);
 
     std::future<return_type> res = task->get_future();
     {
@@ -138,8 +138,7 @@ std::vector<rgba_t> load_rgb(const std::string& filename, int& width, int& heigh
         return {};
     }
     const rgba_t* rgbadata = reinterpret_cast<const rgba_t*>(data);
-    std::vector<rgba_t> vec;
-    vec.assign(rgbadata, rgbadata + width * height);
+    std::vector<rgba_t> vec(rgbadata, rgbadata + width * height);
     stbi_image_free(data);
     return vec;
 }
@@ -470,51 +469,75 @@ std::vector<std::string> openMPCPU(const std::vector<std::pair<std::string, std:
 {
     auto start = std::chrono::high_resolution_clock::now();
 
-    std::vector<std::pair<std::string, double>> filename_medians;
-    filename_medians.reserve(loadedImages.size());
+    // Determine the number of threads
+    int num_threads = omp_get_max_threads();
 
-    // Parallelize the outer loop over images
-#pragma omp parallel for schedule(dynamic)
-    for (size_t i = 0; i < loadedImages.size(); ++i)
+    // Initialize thread-local storage for filename and median pairs
+    std::vector<std::vector<std::pair<std::string, double>>> thread_filename_medians(num_threads);
+    for (int t = 0; t < num_threads; ++t) {
+        thread_filename_medians[t].reserve(loadedImages.size() / num_threads + 1);
+    }
+
+    // Parallelize the outer loop over images using OpenMP
+#pragma omp parallel
     {
-        const auto& filename = loadedImages[i].first;
-        const auto& rgbadata = loadedImages[i].second;
+        int thread_id = omp_get_thread_num();
+        auto& local_filename_medians = thread_filename_medians[thread_id];
 
-        double median = 0.0;
+#pragma omp for schedule(dynamic)
+        for (size_t i = 0; i < loadedImages.size(); ++i)
+        {
+            const auto& filename = loadedImages[i].first;
+            const auto& rgbadata = loadedImages[i].second;
 
-        if (!rgbadata.empty()) {
-            std::vector<double> temperatures;
-            temperatures.reserve(rgbadata.size());
+            double median = 0.0;
 
-            // Compute color temperatures
-            for (const auto& pixel : rgbadata)
-            {
-                temperatures.push_back(rgbToColorTemperature(pixel));
+            if (!rgbadata.empty()) {
+                size_t pixel_count = rgbadata.size();
+                std::vector<double> temperatures;
+                temperatures.reserve(pixel_count);
+                temperatures.resize(pixel_count);
+
+                // Compute color temperatures using SIMD vectorization
+#pragma omp simd
+                for (size_t j = 0; j < pixel_count; ++j)
+                {
+                    temperatures[j] = rgbToColorTemperature(rgbadata[j]);
+                }
+
+                // Calculate the median temperature
+                median = calculate_median(temperatures);
             }
 
-            // Compute median
-            median = calculate_median(temperatures);
-        }
-
-        // Protect the shared resource with a critical section
-#pragma omp critical
-        {
-            filename_medians.emplace_back(filename, median);
+            // Store the result in thread-local storage
+            local_filename_medians.emplace_back(filename, median);
         }
     }
 
-    // Sort based on median using C++17 Parallel Algorithms
+    // Merge all thread-local filename_medians into a single vector
+    std::vector<std::pair<std::string, double>> filename_medians;
+    filename_medians.reserve(loadedImages.size());
+
+    for (int t = 0; t < num_threads; ++t)
+    {
+        auto& thread_medians = thread_filename_medians[t];
+        filename_medians.insert(filename_medians.end(),
+            std::make_move_iterator(thread_medians.begin()),
+            std::make_move_iterator(thread_medians.end()));
+    }
+
+    // Sort the filename_medians based on median using C++17 Parallel Algorithms
     std::sort(std::execution::par, filename_medians.begin(), filename_medians.end(),
         [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) -> bool {
             return a.second < b.second;
         });
 
-    // Extract sorted filenames
+    // Extract the sorted filenames
     std::vector<std::string> sortedFilenames;
     sortedFilenames.reserve(filename_medians.size());
-    for (const auto& pair : filename_medians)
+    for (auto& pair : filename_medians)
     {
-        sortedFilenames.push_back(pair.first);
+        sortedFilenames.emplace_back(std::move(pair.first));
     }
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -523,62 +546,107 @@ std::vector<std::string> openMPCPU(const std::vector<std::pair<std::string, std:
     return sortedFilenames;
 }
 
-// Function to process images using SIMD instructions
+// Function to process images using SIMD (Single Instruction, Multiple Data) with OpenMP
 std::vector<std::string> simdCPU(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
 {
     auto start = std::chrono::high_resolution_clock::now();
 
-    std::vector<std::pair<std::string, double>> filename_medians;
-    filename_medians.reserve(loadedImages.size());
+    // Determine the number of threads
+    int num_threads = omp_get_max_threads();
+
+    // Initialize thread-local storage for filename and median pairs
+    std::vector<std::vector<std::pair<std::string, double>>> thread_filename_medians(num_threads);
+    for (int t = 0; t < num_threads; ++t) {
+        thread_filename_medians[t].reserve(loadedImages.size() / num_threads + 1);
+    }
 
     // Parallelize the outer loop over images using OpenMP
-#pragma omp parallel for schedule(dynamic)
-    for (size_t i = 0; i < loadedImages.size(); ++i)
+#pragma omp parallel
     {
-        const auto& filename = loadedImages[i].first;
-        const auto& rgbadata = loadedImages[i].second;
+        int thread_id = omp_get_thread_num();
+        auto& local_filename_medians = thread_filename_medians[thread_id];
 
-        double median = 0.0;
+#pragma omp for schedule(dynamic)
+        for (size_t i = 0; i < loadedImages.size(); ++i)
+        {
+            const auto& filename = loadedImages[i].first;
+            const auto& rgbadata = loadedImages[i].second;
 
-        if (!rgbadata.empty()) {
-            std::vector<double> temperatures(rgbadata.size());
+            double median = 0.0;
 
-            // Compute color temperatures using OpenMP SIMD directives
+            if (!rgbadata.empty()) {
+                size_t pixel_count = rgbadata.size();
+                std::vector<double> temperatures;
+                temperatures.reserve(pixel_count);
+                temperatures.resize(pixel_count);
+
+                // Compute color temperatures using SIMD vectorization
 #pragma omp simd
-            for (size_t j = 0; j < rgbadata.size(); ++j)
-            {
-                temperatures[j] = rgbToColorTemperature(rgbadata[j]);
+                for (size_t j = 0; j < pixel_count; ++j)
+                {
+                    temperatures[j] = rgbToColorTemperature(rgbadata[j]);
+                }
+
+                // Calculate the median temperature
+                median = calculate_median(temperatures);
             }
 
-            // Compute median
-            median = calculate_median(temperatures);
-        }
-
-        // Protect the shared resource with a critical section
-#pragma omp critical
-        {
-            filename_medians.emplace_back(filename, median);
+            // Store the result in thread-local storage
+            local_filename_medians.emplace_back(filename, median);
         }
     }
 
-    // Sort based on median using C++17 Parallel Algorithms
+    // Merge all thread-local filename_medians into a single vector
+    std::vector<std::pair<std::string, double>> filename_medians;
+    filename_medians.reserve(loadedImages.size());
+
+    for (int t = 0; t < num_threads; ++t)
+    {
+        auto& thread_medians = thread_filename_medians[t];
+        filename_medians.insert(filename_medians.end(),
+            std::make_move_iterator(thread_medians.begin()),
+            std::make_move_iterator(thread_medians.end()));
+    }
+
+    // Sort the filename_medians based on median using C++17 Parallel Algorithms
     std::sort(std::execution::par, filename_medians.begin(), filename_medians.end(),
         [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) -> bool {
             return a.second < b.second;
         });
 
-    // Extract sorted filenames
+    // Extract the sorted filenames
     std::vector<std::string> sortedFilenames;
     sortedFilenames.reserve(filename_medians.size());
-    for (const auto& pair : filename_medians)
+    for (auto& pair : filename_medians)
     {
-        sortedFilenames.push_back(pair.first);
+        sortedFilenames.emplace_back(std::move(pair.first));
     }
 
     auto end = std::chrono::high_resolution_clock::now();
     duration = std::chrono::duration<double>(end - start).count();
 
     return sortedFilenames;
+}
+
+// Helper function to verify that all sorted lists are identical
+bool verify_sorting_results(const std::vector<std::pair<std::string, std::vector<std::string>>>& sorted_results)
+{
+    if (sorted_results.empty()) return true;
+
+    const std::vector<std::string>& reference = sorted_results[0].second;
+    bool all_match = true;
+
+    for (size_t i = 1; i < sorted_results.size(); ++i)
+    {
+        const auto& current = sorted_results[i].second;
+        if (current != reference)
+        {
+            std::cerr << "Discrepancy found in method: " << sorted_results[i].first << std::endl;
+            all_match = false;
+        }
+    }
+
+    return all_match;
 }
 
 int main()
@@ -592,6 +660,8 @@ int main()
         printf("Directory \"%s\" not found: please make sure it exists, and if it's a relative path, it's under your WORKING directory\n", image_folder.c_str());
         return -1;
     }
+
+    // Collect image filenames
     std::vector<std::string> imageFilenames;
     for (auto& p : fs::directory_iterator(image_folder))
     {
@@ -633,18 +703,18 @@ int main()
     std::vector<std::string> sortedFilenames_async;
     std::vector<std::string> sortedFilenames_pool;
     std::vector<std::string> sortedFilenames_parallel_cpu; // C++17 Parallel Algorithms CPU
-    std::vector<std::string> sortedFilenames_cuda; // CUDA
-    std::vector<std::string> sortedFilenames_openmp; // OpenMP
-    std::vector<std::string> sortedFilenames_simd; // SIMD
+    std::vector<std::string> sortedFilenames_cuda;         // CUDA
+    std::vector<std::string> sortedFilenames_openmp;       // OpenMP
+    std::vector<std::string> sortedFilenames_simd;         // SIMD
 
     // Containers to hold durations
     double duration_single = 0.0;
     double duration_async = 0.0;
     double duration_pool = 0.0;
     double duration_parallel_cpu = 0.0; // C++17 Parallel Algorithms CPU
-    double duration_cuda = 0.0; // CUDA
-    double duration_openmp = 0.0; // OpenMP
-    double duration_simd = 0.0; // SIMD
+    double duration_cuda = 0.0;         // CUDA
+    double duration_openmp = 0.0;       // OpenMP
+    double duration_simd = 0.0;         // SIMD
 
     // Single-Threaded CPU Sort
     sortedFilenames_single = singleThreadedCPU(loadedImages, duration_single);
@@ -674,9 +744,30 @@ int main()
     sortedFilenames_simd = simdCPU(loadedImages, duration_simd);
     std::cout << "SIMD-Based CPU Sort Time: " << duration_simd << " seconds" << std::endl;
 
+    // Organize all sorted results with their method names
+    std::vector<std::pair<std::string, std::vector<std::string>>> sorted_results = {
+        { "Single-Threaded CPU", sortedFilenames_single },
+        { "Multi-Threaded CPU using std::async", sortedFilenames_async },
+        { "Multi-Threaded CPU using ThreadPool", sortedFilenames_pool },
+        { "C++17 Parallel Algorithms CPU", sortedFilenames_parallel_cpu },
+        { "GPU-Accelerated CUDA", sortedFilenames_cuda },
+        { "OpenMP-Based CPU", sortedFilenames_openmp },
+        { "SIMD-Based CPU", sortedFilenames_simd }
+    };
+
+    // Verify that all sorted lists are identical
+    bool all_match = verify_sorting_results(sorted_results);
+
+    if (all_match)
+    {
+        std::cout << "\nAll sorting methods produced identical results." << std::endl;
+    }
+    else
+    {
+        std::cout << "\nSome sorting methods produced different results. Please check the above discrepancies." << std::endl;
+    }
+
     // Determine the fastest method to display (optional)
-    // For demonstration, let's choose the fastest sorted list
-    // You can implement logic to select based on minimum duration
     double min_duration = duration_single;
     std::vector<std::string>* fastest_sorted_filenames = &sortedFilenames_single;
 
@@ -744,6 +835,7 @@ int main()
         return EXIT_FAILURE;
     }
     sf::Sprite sprite(texture);
+
     // Make sure the texture fits the screen
     auto SpriteScaleFromDimensions = [](const sf::Vector2u& textureSize, int screenWidth, int screenHeight) -> sf::Vector2f {
         float scaleX = static_cast<float>(screenWidth) / static_cast<float>(textureSize.x);
@@ -781,14 +873,17 @@ int main()
             if (event.type == sf::Event::KeyPressed)
             {
                 // Adjust the image index
-                if (event.key.code == sf::Keyboard::Key::Left)
+                if (event.key.code == sf::Keyboard::Left)
                     imageIndex = (imageIndex + imageFilenames_sorted.size() - 1) % imageFilenames_sorted.size();
-                else if (event.key.code == sf::Keyboard::Key::Right)
+                else if (event.key.code == sf::Keyboard::Right)
                     imageIndex = (imageIndex + 1) % imageFilenames_sorted.size();
+
                 // Get image filename
                 const auto& imageFilename = imageFilenames_sorted[imageIndex];
+
                 // Set it as the window title 
                 window.setTitle(imageFilename);
+
                 // ... and load the appropriate texture, and put it in the sprite
                 if (texture.loadFromFile(imageFilename))
                 {
@@ -804,8 +899,10 @@ int main()
 
         // Clear the window
         window.clear(sf::Color(0, 0, 0));
+
         // Draw the sprite
         window.draw(sprite);
+
         // Display things on screen
         window.display();
     }
