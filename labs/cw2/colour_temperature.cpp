@@ -1,4 +1,4 @@
-// colour_temperature_optimized.cu
+// colour_temperature.cu
 #include <cuda_runtime.h>
 #include <cmath>
 #include <iostream>
@@ -36,7 +36,7 @@ __global__ void computeColorTemperaturesKernel(const rgba_t* __restrict__ d_imag
 
     // Calculate chromaticity coordinates
     double denominator = X + Y + Z;
-    if (denominator == 0.0) {
+    if (fabs(denominator) < 1e-10) {
         d_temperatures[idx] = 0.0;
         return;
     }
@@ -46,13 +46,15 @@ __global__ void computeColorTemperaturesKernel(const rgba_t* __restrict__ d_imag
 
     // Approximate color temperature using McCamy's formula
     double n = (x - 0.3320) / (0.1858 - y);
-    double CCT = 449.0 * pow(n, 3) + 3525.0 * pow(n, 2) + 6823.3 * n + 5520.33;
+    double n2 = n * n;
+    double n3 = n2 * n;
+    double CCT = 449.0 * n3 + 3525.0 * n2 + 6823.3 * n + 5520.33;
 
     d_temperatures[idx] = CCT;
 }
 
 // Host function to compute color temperatures using CUDA
-extern "C" bool computeColorTemperaturesCUDA(const rgba_t * h_images, double* h_temperatures, int total_pixels) {
+extern "C" bool computeColorTemperaturesCUDA(const rgba_t* h_images, double* h_temperatures, int total_pixels) {
     // Allocate device memory
     rgba_t* d_images = nullptr;
     double* d_temperatures_device = nullptr;

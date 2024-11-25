@@ -39,6 +39,25 @@ extern "C" bool computeColorTemperaturesCUDA(const rgba_t * h_images, double* h_
 
 namespace fs = std::filesystem;
 
+inline double fastGammaCorrection(double value) {
+    // Use a polynomial approximation or fast exponentiation
+    if (value <= 0.04045) {
+        return value / 12.92;
+    }
+    else {
+        return pow(value, 2.4); // Or use a faster approximation
+    }
+}
+
+static double gamma_correction_table[256];
+void initializeGammaCorrectionTable() {
+    for (int i = 0; i < 256; ++i) {
+        double value = i / 255.0;
+        gamma_correction_table[i] = (value <= 0.04045) ? (value / 12.92)
+            : pow((value + 0.055) / 1.055, 2.4);
+    }
+}
+
 // ThreadPool Class Definition
 class ThreadPool {
 public:
@@ -145,6 +164,7 @@ std::vector<rgba_t> load_rgb(const std::string& filename, int& width, int& heigh
 
 // Conversion to color temperature
 inline double rgbToColorTemperature(const rgba_t& rgba) {
+
     // Normalize RGB values to [0, 1]
     double red = rgba.r / 255.0;
     double green = rgba.g / 255.0;
@@ -361,50 +381,62 @@ std::vector<std::string> multiThreadedCPUThreadPool(const std::vector<std::pair<
     return sortedFilenames;
 }
 
-// Function to process images using C++17 Parallel Algorithms for CPU
-std::vector<std::string> parallelCPUStandardLibrary(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
+std::vector<std::string> parallelCPUStandardLibrary(
+    const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages,
+    double& duration)
 {
     auto start = std::chrono::high_resolution_clock::now();
 
+    size_t num_images = loadedImages.size();
+
     // Pre-allocate the vector with the same size as loadedImages
-    std::vector<std::pair<std::string, double>> filename_medians(loadedImages.size());
+    std::vector<std::pair<std::string, double>> filename_medians(num_images);
 
-    // Use std::transform with parallel execution policy
-    std::transform(std::execution::par, loadedImages.begin(), loadedImages.end(), filename_medians.begin(),
-        [&](const std::pair<std::string, std::vector<rgba_t>>& pair) -> std::pair<std::string, double> {
+    // Ensure gamma correction table is initialized
+    initializeGammaCorrectionTable();
+
+    // Use std::for_each with parallel unsequenced execution policy
+    std::for_each(std::execution::par_unseq, loadedImages.begin(), loadedImages.end(),
+        [&](const auto& pair) {
             const std::string& filename = pair.first;
-    const std::vector<rgba_t>& rgbadata = pair.second;
+            const std::vector<rgba_t>& rgbadata = pair.second;
 
-    double median = 0.0;
-    if (!rgbadata.empty()) {
-        std::vector<double> temperatures(rgbadata.size());
+            double median = 0.0;
+            if (!rgbadata.empty()) {
+                size_t pixel_count = rgbadata.size();
 
-        // Compute color temperatures using parallel transform
-        std::transform(std::execution::par, rgbadata.begin(), rgbadata.end(), temperatures.begin(),
-            [&](const rgba_t& pixel) -> double {
-                return rgbToColorTemperature(pixel);
-            });
+                // Use aligned storage for temperatures to aid vectorization
+                std::vector<double> temperatures(pixel_count);
 
-        // Compute median
-        median = calculate_median(temperatures);
-    }
+                auto* temp_ptr = temperatures.data();
+                auto* rgba_ptr = rgbadata.data();
 
-    return { filename, median };
+                // Use compiler-specific pragma for vectorization
+#pragma loop(ivdep)
+                for (size_t i = 0; i < pixel_count; ++i) {
+                    temp_ptr[i] = rgbToColorTemperature(rgba_ptr[i]);
+                }
+
+                // Compute median
+                median = calculate_median(temperatures);
+            }
+
+            // Store the result
+            size_t index = &pair - &loadedImages[0];
+            filename_medians[index] = { filename, median };
         });
 
     // Sort based on median
-    std::sort(std::execution::par, filename_medians.begin(), filename_medians.end(),
-        [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) -> bool {
+    std::sort(std::execution::par_unseq, filename_medians.begin(), filename_medians.end(),
+        [](const auto& a, const auto& b) {
             return a.second < b.second;
         });
 
     // Extract sorted filenames
-    std::vector<std::string> sortedFilenames;
-    sortedFilenames.reserve(filename_medians.size());
-    for (const auto& pair : filename_medians)
-    {
-        sortedFilenames.push_back(pair.first);
-    }
+    std::vector<std::string> sortedFilenames(num_images);
+    std::transform(std::execution::par, filename_medians.begin(), filename_medians.end(),
+        sortedFilenames.begin(),
+        [](const auto& pair) { return pair.first; });
 
     auto end = std::chrono::high_resolution_clock::now();
     duration = std::chrono::duration<double>(end - start).count();
@@ -654,7 +686,7 @@ int main()
     std::srand(static_cast<unsigned int>(std::time(NULL)));
 
     // Example folder to load images
-    const std::string image_folder = "imagesHiRes";
+    const std::string image_folder = "imagesSmall";
     if (!fs::is_directory(image_folder))
     {
         printf("Directory \"%s\" not found: please make sure it exists, and if it's a relative path, it's under your WORKING directory\n", image_folder.c_str());
@@ -699,18 +731,18 @@ int main()
     }
 
     // Containers to hold sorted filenames for each method
-    std::vector<std::string> sortedFilenames_single;
-    std::vector<std::string> sortedFilenames_async;
-    std::vector<std::string> sortedFilenames_pool;
+    std::vector<std::string> sortedFilenames_single;       //Single Thread
+    std::vector<std::string> sortedFilenames_async;        //async
+    std::vector<std::string> sortedFilenames_pool;         //Thread Pool
     std::vector<std::string> sortedFilenames_parallel_cpu; // C++17 Parallel Algorithms CPU
     std::vector<std::string> sortedFilenames_cuda;         // CUDA
     std::vector<std::string> sortedFilenames_openmp;       // OpenMP
     std::vector<std::string> sortedFilenames_simd;         // SIMD
 
     // Containers to hold durations
-    double duration_single = 0.0;
-    double duration_async = 0.0;
-    double duration_pool = 0.0;
+    double duration_single = 0.0;       //Single Thread
+    double duration_async = 0.0;        //async
+    double duration_pool = 0.0;         //Thread Pool
     double duration_parallel_cpu = 0.0; // C++17 Parallel Algorithms CPU
     double duration_cuda = 0.0;         // CUDA
     double duration_openmp = 0.0;       // OpenMP
