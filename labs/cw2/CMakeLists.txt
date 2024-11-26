@@ -1,14 +1,9 @@
-# CMakeLists.txt
 cmake_minimum_required(VERSION 3.18)
-project(set10108-cw2 CUDA CXX)
+project(set10108-cw2 CXX)
 
-# Enable C++17 and CUDA
+# Enable C++17
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-enable_language(CUDA)
-
-# Specify CUDA architectures to target
-set(CMAKE_CUDA_ARCHITECTURES 61)
 
 # Include directories
 include_directories(
@@ -31,8 +26,8 @@ if (NOT WIN32)
     endif()
 endif()
 
-# Add executable with C++ and CUDA source files
-add_executable(cw2_main cw2_main.cpp colour_temperature.cu)
+# Add executable with C++ source files
+add_executable(cw2_main cw2_main.cpp)
 
 # Link libraries
 if (WIN32)
@@ -43,14 +38,12 @@ if (WIN32)
         debug sfml-system-d
         debug sfml-window-d
         debug sfml-graphics-d
-        cudart
     )
 else()
     target_link_libraries(cw2_main
         sfml-system
         sfml-window
         sfml-graphics
-        cudart
     )
 endif()
 

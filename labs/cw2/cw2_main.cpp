@@ -35,11 +35,8 @@ struct rgba_t {
     uint8_t a;
 };
 
-// Forward declaration of CUDA function
-extern "C" bool computeColorTemperaturesCUDA(const rgba_t * h_images, double* h_temperatures, int total_pixels);
-
 // ============================================================================
-// ThreadPool Class Definition
+# // ThreadPool Class Definition
 // ============================================================================
 
 class ThreadPool {
@@ -92,7 +89,7 @@ inline ThreadPool::ThreadPool(size_t threads)
                     task();
                 }
             }
-            );
+        );
 }
 
 // Enqueue method implementation
@@ -130,7 +127,7 @@ inline ThreadPool::~ThreadPool()
 }
 
 // ============================================================================
-// Precomputed Gamma Correction and pow(x, 2.4) Tables
+# // Precomputed Gamma Correction and pow(x, 2.4) Tables
 // ============================================================================
 
 static double gamma_correction_table_unoptimised[256];
@@ -160,7 +157,7 @@ void initialiseTables_optimised() {
 }
 
 // ============================================================================
-// Unoptimised Functions
+# // Unoptimised Functions
 // ============================================================================
 
 // Helper function to load RGB data from a file (Unoptimised)
@@ -211,7 +208,7 @@ inline double rgbToColourTemperature_unoptimised(const rgba_t& rgba) {
 }
 
 // ============================================================================
-// optimised Functions
+# // optimised Functions
 // ============================================================================
 
 // Helper function to load RGB data from a file (optimised)
@@ -257,7 +254,7 @@ inline double rgbToColourTemperature_optimised(const rgba_t& rgba) {
 }
 
 // ============================================================================
-// Median Calculation
+# // Median Calculation
 // ============================================================================
 
 // Calculate the median from a vector of temperatures
@@ -277,7 +274,7 @@ double calculate_median(std::vector<double>& temperatures) {
 }
 
 // ============================================================================
-// Processing Functions
+# // Processing Functions
 // ============================================================================
 
 // Function to process images in a single-threaded manner (Unoptimised)
@@ -400,17 +397,17 @@ std::vector<std::string> multiThreadedCPUAsync(const std::vector<std::pair<std::
                 return { filename, 0.0 };
             }
 
-        // Compute colour temperatures
-        std::vector<double> temperatures;
-        temperatures.reserve(rgbadata.size());
-        for (const auto& pixel : rgbadata)
-        {
-            temperatures.push_back(rgbToColourTemperature_optimised(pixel));
-        }
+            // Compute colour temperatures
+            std::vector<double> temperatures;
+            temperatures.reserve(rgbadata.size());
+            for (const auto& pixel : rgbadata)
+            {
+                temperatures.push_back(rgbToColourTemperature_optimised(pixel));
+            }
 
-        // Compute median
-        double median = calculate_median(temperatures);
-        return { filename, median };
+            // Compute median
+            double median = calculate_median(temperatures);
+            return { filename, median };
             }));
     }
 
@@ -461,17 +458,17 @@ std::vector<std::string> multiThreadedCPUThreadPool(const std::vector<std::pair<
                 return { filename, 0.0 };
             }
 
-        // Compute colour temperatures
-        std::vector<double> temperatures;
-        temperatures.reserve(rgbadata.size());
-        for (const auto& pixel : rgbadata)
-        {
-            temperatures.push_back(rgbToColourTemperature_optimised(pixel));
-        }
+            // Compute colour temperatures
+            std::vector<double> temperatures;
+            temperatures.reserve(rgbadata.size());
+            for (const auto& pixel : rgbadata)
+            {
+                temperatures.push_back(rgbToColourTemperature_optimised(pixel));
+            }
 
-        // Compute median
-        double median = calculate_median(temperatures);
-        return { filename, median };
+            // Compute median
+            double median = calculate_median(temperatures);
+            return { filename, median };
             }));
     }
 
@@ -570,60 +567,8 @@ std::vector<std::string> parallelCPUStandardLibrary(
     return sortedFilenames;
 }
 
-// Function to process images using CUDA (optimised)
-std::vector<std::string> multiThreadedCPUCUDAMethod(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
-{
-    auto start = std::chrono::high_resolution_clock::now();
-
-    std::vector<std::pair<std::string, double>> filename_medians;
-    filename_medians.reserve(loadedImages.size());
-
-    for (const auto& pair : loadedImages)
-    {
-        const auto& filename = pair.first;
-        const auto& rgbadata = pair.second;
-
-        if (rgbadata.empty()) {
-            filename_medians.emplace_back(filename, 0.0);
-            continue;
-        }
-
-        int total_pixels = static_cast<int>(rgbadata.size());
-        std::vector<double> temperatures(total_pixels);
-
-        bool success = computeColorTemperaturesCUDA(rgbadata.data(), temperatures.data(), total_pixels);
-        if (!success) {
-            std::cerr << "CUDA processing failed for image: " << filename << std::endl;
-            filename_medians.emplace_back(filename, 0.0);
-            continue;
-        }
-
-        double median = calculate_median(temperatures);
-        filename_medians.emplace_back(filename, median);
-    }
-
-    // Sort based on median
-    std::sort(filename_medians.begin(), filename_medians.end(),
-        [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) -> bool {
-            return a.second < b.second;
-        });
-
-    // Extract sorted filenames
-    std::vector<std::string> sortedFilenames;
-    sortedFilenames.reserve(filename_medians.size());
-    for (const auto& pair : filename_medians)
-    {
-        sortedFilenames.push_back(pair.first);
-    }
-
-    auto end = std::chrono::high_resolution_clock::now();
-    duration = std::chrono::duration<double>(end - start).count();
-
-    return sortedFilenames;
-}
-
 // ============================================================================
-// Verification Function
+# // Verification Function
 // ============================================================================
 
 // Helper function to verify that all sorted lists are identical
@@ -648,7 +593,7 @@ bool verify_sorting_results(const std::vector<std::pair<std::string, std::vector
 }
 
 // ============================================================================
-// Main Function
+# // Main Function
 // ============================================================================
 
 int main()
@@ -656,7 +601,7 @@ int main()
     std::srand(static_cast<unsigned int>(std::time(NULL)));
 
     // Example folder to load images
-    const std::string image_folder = "imagesLarge";
+    const std::string image_folder = "imagesSmall";
     if (!fs::is_directory(image_folder))
     {
         printf("Directory \"%s\" not found: please make sure it exists, and if it's a relative path, it's under your WORKING directory\n", image_folder.c_str());
@@ -691,10 +636,10 @@ int main()
     {
         futures_load.emplace_back(pool.enqueue([filename]() -> std::pair<std::string, std::vector<rgba_t>> {
             int width, height;
-        // Choose which load function to use here
-        // For preloading, we'll use the optimised version
-        auto rgbadata = load_rgb_optimised(filename, width, height);
-        return { filename, std::move(rgbadata) };
+            // Choose which load function to use here
+            // For preloading, we'll use the optimised version
+            auto rgbadata = load_rgb_optimised(filename, width, height);
+            return { filename, std::move(rgbadata) };
             }));
     }
 
@@ -712,7 +657,6 @@ int main()
     std::vector<std::string> sortedFilenames_async;        // Async
     std::vector<std::string> sortedFilenames_pool;         // Thread Pool
     std::vector<std::string> sortedFilenames_parallel_cpu; // C++17 Parallel Algorithms CPU
-    std::vector<std::string> sortedFilenames_cuda;         // CUDA
 
     // Containers to hold durations
     double duration_single_unoptimised = 0.0;       // Single Thread Unoptimised
@@ -720,7 +664,6 @@ int main()
     double duration_async = 0.0;        // Async
     double duration_pool = 0.0;         // Thread Pool
     double duration_parallel_cpu = 0.0; // C++17 Parallel Algorithms CPU
-    double duration_cuda = 0.0;         // CUDA
 
     // Single-Threaded CPU Sort (Unoptimised)
     sortedFilenames_single_unoptimised = singleThreadedCPU_unoptimised(loadedImages, duration_single_unoptimised);
@@ -742,18 +685,13 @@ int main()
     sortedFilenames_parallel_cpu = parallelCPUStandardLibrary(loadedImages, duration_parallel_cpu);
     std::cout << "C++17 Parallel Algorithms CPU Sort Time: " << duration_parallel_cpu << " seconds" << std::endl;
 
-    // GPU-Accelerated CPU Sort using CUDA (optimised)
-    sortedFilenames_cuda = multiThreadedCPUCUDAMethod(loadedImages, duration_cuda);
-    std::cout << "GPU-Accelerated CPU Sort using CUDA Time: " << duration_cuda << " seconds" << std::endl;
-
     // Organize all sorted results with their method names
     std::vector<std::pair<std::string, std::vector<std::string>>> sorted_results = {
         { "Single-Threaded CPU (Unoptimised)", sortedFilenames_single_unoptimised },
         { "Single-Threaded CPU (optimised)", sortedFilenames_single_optimised },
         { "Multi-Threaded CPU using std::async", sortedFilenames_async },
         { "Multi-Threaded CPU using ThreadPool", sortedFilenames_pool },
-        { "C++17 Parallel Algorithms CPU", sortedFilenames_parallel_cpu },
-        { "GPU-Accelerated CUDA", sortedFilenames_cuda }
+        { "C++17 Parallel Algorithms CPU", sortedFilenames_parallel_cpu }
     };
 
     // Verify that all sorted lists are identical
@@ -793,11 +731,6 @@ int main()
         fastest_sorted_filenames = &sortedFilenames_parallel_cpu;
         fastest_method = "C++17 Parallel Algorithms CPU";
     }
-    if (duration_cuda < min_duration) {
-        min_duration = duration_cuda;
-        fastest_sorted_filenames = &sortedFilenames_cuda;
-        fastest_method = "GPU-Accelerated CUDA";
-    }
 
     std::cout << "\nFastest Method: " << fastest_method << " with " << min_duration << " seconds." << std::endl;
 
@@ -830,7 +763,7 @@ int main()
         float scaleY = static_cast<float>(screenHeight) / static_cast<float>(textureSize.y);
         float scale = std::min(scaleX, scaleY);
         return { scale, scale };
-    };
+        };
     sprite.setScale(SpriteScaleFromDimensions(texture.getSize(), gameWidth, gameHeight));
 
     // Main loop
