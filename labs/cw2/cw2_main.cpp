@@ -656,7 +656,7 @@ int main()
     std::srand(static_cast<unsigned int>(std::time(NULL)));
 
     // Example folder to load images
-    const std::string image_folder = "imagesSmall";
+    const std::string image_folder = "imagesLarge";
     if (!fs::is_directory(image_folder))
     {
         printf("Directory \"%s\" not found: please make sure it exists, and if it's a relative path, it's under your WORKING directory\n", image_folder.c_str());
