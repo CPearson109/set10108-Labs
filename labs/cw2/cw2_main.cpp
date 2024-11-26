@@ -36,7 +36,7 @@ struct rgba_t {
 };
 
 // ============================================================================
-# // ThreadPool Class Definition
+/* ThreadPool Class Definition */
 // ============================================================================
 
 class ThreadPool {
@@ -127,7 +127,7 @@ inline ThreadPool::~ThreadPool()
 }
 
 // ============================================================================
-# // Precomputed Gamma Correction and pow(x, 2.4) Tables
+/* Precomputed Gamma Correction and pow(x, 2.4) Tables */
 // ============================================================================
 
 static double gamma_correction_table_unoptimised[256];
@@ -146,7 +146,7 @@ void initialiseTables_unoptimised() {
     }
 }
 
-// Function to initialize the gamma correction and pow24 tables (optimised)
+// Function to initialize the gamma correction and pow24 tables (Optimised)
 void initialiseTables_optimised() {
     for (int i = 0; i < 256; ++i) {
         double value = i / 255.0;
@@ -157,7 +157,7 @@ void initialiseTables_optimised() {
 }
 
 // ============================================================================
-# // Unoptimised Functions
+/* Unoptimised Functions */
 // ============================================================================
 
 // Helper function to load RGB data from a file (Unoptimised)
@@ -208,10 +208,10 @@ inline double rgbToColourTemperature_unoptimised(const rgba_t& rgba) {
 }
 
 // ============================================================================
-# // optimised Functions
+/* Optimised Functions */
 // ============================================================================
 
-// Helper function to load RGB data from a file (optimised)
+// Helper function to load RGB data from a file (Optimised)
 std::vector<rgba_t> load_rgb_optimised(const std::string& filename, int& width, int& height)
 {
     int n;
@@ -227,7 +227,7 @@ std::vector<rgba_t> load_rgb_optimised(const std::string& filename, int& width, 
     return vec;
 }
 
-// Conversion to color temperature (optimised)
+// Conversion to color temperature (Optimised)
 inline double rgbToColourTemperature_optimised(const rgba_t& rgba) {
 
     // Normalize RGB values to [0, 1] using precomputed gamma correction table
@@ -254,7 +254,7 @@ inline double rgbToColourTemperature_optimised(const rgba_t& rgba) {
 }
 
 // ============================================================================
-# // Median Calculation
+/* Median Calculation */
 // ============================================================================
 
 // Calculate the median from a vector of temperatures
@@ -274,7 +274,7 @@ double calculate_median(std::vector<double>& temperatures) {
 }
 
 // ============================================================================
-# // Processing Functions
+/* Processing Functions */
 // ============================================================================
 
 // Function to process images in a single-threaded manner (Unoptimised)
@@ -328,7 +328,7 @@ std::vector<std::string> singleThreadedCPU_unoptimised(const std::vector<std::pa
     return sortedFilenames;
 }
 
-// Function to process images in a single-threaded manner (optimised)
+// Function to process images in a single-threaded manner (Optimised)
 std::vector<std::string> singleThreadedCPU_optimised(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
 {
     auto start = std::chrono::high_resolution_clock::now();
@@ -379,7 +379,7 @@ std::vector<std::string> singleThreadedCPU_optimised(const std::vector<std::pair
     return sortedFilenames;
 }
 
-// Function to process images using std::async (optimised)
+// Function to process images using std::async (Optimised)
 std::vector<std::string> multiThreadedCPUAsync(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
 {
     auto start = std::chrono::high_resolution_clock::now();
@@ -439,7 +439,7 @@ std::vector<std::string> multiThreadedCPUAsync(const std::vector<std::pair<std::
     return sortedFilenames;
 }
 
-// Function to process images using ThreadPool (optimised)
+// Function to process images using ThreadPool (Optimised)
 std::vector<std::string> multiThreadedCPUThreadPool(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
 {
     auto start = std::chrono::high_resolution_clock::now();
@@ -500,7 +500,7 @@ std::vector<std::string> multiThreadedCPUThreadPool(const std::vector<std::pair<
     return sortedFilenames;
 }
 
-// optimised Function: Parallel CPU Sort using C++17 Parallel Algorithms with OpenMP and SIMD
+// Optimised Function: Parallel CPU Sort using C++17 Parallel Algorithms with OpenMP and SIMD
 std::vector<std::string> parallelCPUStandardLibrary(
     const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages,
     double& duration)
@@ -568,7 +568,7 @@ std::vector<std::string> parallelCPUStandardLibrary(
 }
 
 // ============================================================================
-# // Verification Function
+/* Verification Function */
 // ============================================================================
 
 // Helper function to verify that all sorted lists are identical
@@ -593,15 +593,38 @@ bool verify_sorting_results(const std::vector<std::pair<std::string, std::vector
 }
 
 // ============================================================================
-# // Main Function
+/* Main Function */
 // ============================================================================
 
 int main()
 {
     std::srand(static_cast<unsigned int>(std::time(NULL)));
 
+    // Display CPU Information
+    unsigned int num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0) num_threads = 2; // Fallback if hardware_concurrency is not well-defined
+    std::cout << "Number of hardware threads available: " << num_threads << std::endl;
+
+    // Prompt user for number of runs
+    int num_runs = 1;
+    std::cout << "Enter the number of runs for each sorting method: ";
+    while (true)
+    {
+        std::cin >> num_runs;
+        if (std::cin.fail() || num_runs <= 0)
+        {
+            std::cin.clear(); // Clear the error flags
+            std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n'); // Discard invalid input
+            std::cout << "Invalid input. Please enter a positive integer: ";
+        }
+        else
+        {
+            break;
+        }
+    }
+
     // Example folder to load images
-    const std::string image_folder = "imagesSmall";
+    const std::string image_folder = "imagesLarge";
     if (!fs::is_directory(image_folder))
     {
         printf("Directory \"%s\" not found: please make sure it exists, and if it's a relative path, it's under your WORKING directory\n", image_folder.c_str());
@@ -628,7 +651,7 @@ int main()
     initialiseTables_optimised();
 
     // Preload all images in parallel using ThreadPool
-    ThreadPool pool(std::thread::hardware_concurrency());
+    ThreadPool pool(num_threads);
     std::vector<std::future<std::pair<std::string, std::vector<rgba_t>>>> futures_load;
     futures_load.reserve(imageFilenames.size());
 
@@ -636,7 +659,6 @@ int main()
     {
         futures_load.emplace_back(pool.enqueue([filename]() -> std::pair<std::string, std::vector<rgba_t>> {
             int width, height;
-            // Choose which load function to use here
             // For preloading, we'll use the optimised version
             auto rgbadata = load_rgb_optimised(filename, width, height);
             return { filename, std::move(rgbadata) };
@@ -651,91 +673,98 @@ int main()
         loadedImages.emplace_back(fut.get());
     }
 
-    // Containers to hold sorted filenames for each method
-    std::vector<std::string> sortedFilenames_single_unoptimised;       // Single Thread Unoptimised
-    std::vector<std::string> sortedFilenames_single_optimised;         // Single Thread optimised
-    std::vector<std::string> sortedFilenames_async;        // Async
-    std::vector<std::string> sortedFilenames_pool;         // Thread Pool
-    std::vector<std::string> sortedFilenames_parallel_cpu; // C++17 Parallel Algorithms CPU
-
-    // Containers to hold durations
-    double duration_single_unoptimised = 0.0;       // Single Thread Unoptimised
-    double duration_single_optimised = 0.0;         // Single Thread optimised
-    double duration_async = 0.0;        // Async
-    double duration_pool = 0.0;         // Thread Pool
-    double duration_parallel_cpu = 0.0; // C++17 Parallel Algorithms CPU
-
-    // Single-Threaded CPU Sort (Unoptimised)
-    sortedFilenames_single_unoptimised = singleThreadedCPU_unoptimised(loadedImages, duration_single_unoptimised);
-    std::cout << "Single-Threaded CPU Sort (Unoptimised) Time: " << duration_single_unoptimised << " seconds" << std::endl;
-
-    // Single-Threaded CPU Sort (optimised)
-    sortedFilenames_single_optimised = singleThreadedCPU_optimised(loadedImages, duration_single_optimised);
-    std::cout << "Single-Threaded CPU Sort (optimised) Time: " << duration_single_optimised << " seconds" << std::endl;
-
-    // Multi-Threaded CPU Sort using std::async (optimised)
-    sortedFilenames_async = multiThreadedCPUAsync(loadedImages, duration_async);
-    std::cout << "Multi-Threaded CPU Sort using std::async Time: " << duration_async << " seconds" << std::endl;
-
-    // Multi-Threaded CPU Sort using ThreadPool (optimised)
-    sortedFilenames_pool = multiThreadedCPUThreadPool(loadedImages, duration_pool);
-    std::cout << "Multi-Threaded CPU Sort using ThreadPool Time: " << duration_pool << " seconds" << std::endl;
-
-    // C++17 Parallel Algorithms-Based CPU Sort (optimised)
-    sortedFilenames_parallel_cpu = parallelCPUStandardLibrary(loadedImages, duration_parallel_cpu);
-    std::cout << "C++17 Parallel Algorithms CPU Sort Time: " << duration_parallel_cpu << " seconds" << std::endl;
-
-    // Organize all sorted results with their method names
-    std::vector<std::pair<std::string, std::vector<std::string>>> sorted_results = {
-        { "Single-Threaded CPU (Unoptimised)", sortedFilenames_single_unoptimised },
-        { "Single-Threaded CPU (optimised)", sortedFilenames_single_optimised },
-        { "Multi-Threaded CPU using std::async", sortedFilenames_async },
-        { "Multi-Threaded CPU using ThreadPool", sortedFilenames_pool },
-        { "C++17 Parallel Algorithms CPU", sortedFilenames_parallel_cpu }
+    // Define sorting methods
+    struct SortMethod {
+        std::string name;
+        std::function<std::vector<std::string>(const std::vector<std::pair<std::string, std::vector<rgba_t>>>&, double&)> func;
     };
 
-    // Verify that all sorted lists are identical
-    bool all_match = verify_sorting_results(sorted_results);
+    std::vector<SortMethod> sortingMethods = {
+        { "Single-Threaded CPU (Unoptimised)", singleThreadedCPU_unoptimised },
+        { "Single-Threaded CPU (Optimised)", singleThreadedCPU_optimised },
+        { "Multi-Threaded CPU using std::async", multiThreadedCPUAsync },
+        { "Multi-Threaded CPU using ThreadPool", multiThreadedCPUThreadPool },
+        { "C++17 Parallel Algorithms CPU", parallelCPUStandardLibrary }
+    };
 
-    if (all_match)
+    // Structure to hold timing information
+    struct MethodTiming {
+        std::string method_name;
+        std::vector<double> times;
+        double average_time;
+        double fastest_time;
+    };
+
+    std::vector<MethodTiming> timingResults;
+
+    // Initialize timing results
+    for (const auto& method : sortingMethods)
     {
-        std::cout << "\nAll sorting methods produced identical results." << std::endl;
+        timingResults.push_back(MethodTiming{ method.name, {}, 0.0, std::numeric_limits<double>::max() });
     }
-    else
+
+    // Execute each sorting method multiple times
+    for (int run = 1; run <= num_runs; ++run)
     {
-        std::cout << "\nSome sorting methods produced different results. Please check the above discrepancies." << std::endl;
+        std::cout << "\nRun " << run << " of " << num_runs << ":" << std::endl;
+        for (size_t i = 0; i < sortingMethods.size(); ++i)
+        {
+            double duration = 0.0;
+            // Execute the sorting method
+            std::vector<std::string> sortedFilenames = sortingMethods[i].func(loadedImages, duration);
+
+            // Record the duration
+            timingResults[i].times.push_back(duration);
+
+            // Output the duration for this run
+            std::cout << "  [" << sortingMethods[i].name << "] Time: " << duration << " seconds" << std::endl;
+        }
     }
 
-    // Determine the fastest method to display
-    double min_duration = duration_single_unoptimised;
-    std::vector<std::string>* fastest_sorted_filenames = &sortedFilenames_single_unoptimised;
-    std::string fastest_method = "Single-Threaded CPU (Unoptimised)";
-
-    if (duration_single_optimised < min_duration) {
-        min_duration = duration_single_optimised;
-        fastest_sorted_filenames = &sortedFilenames_single_optimised;
-        fastest_method = "Single-Threaded CPU (optimised)";
-    }
-    if (duration_async < min_duration) {
-        min_duration = duration_async;
-        fastest_sorted_filenames = &sortedFilenames_async;
-        fastest_method = "Multi-Threaded CPU using std::async";
-    }
-    if (duration_pool < min_duration) {
-        min_duration = duration_pool;
-        fastest_sorted_filenames = &sortedFilenames_pool;
-        fastest_method = "Multi-Threaded CPU using ThreadPool";
-    }
-    if (duration_parallel_cpu < min_duration) {
-        min_duration = duration_parallel_cpu;
-        fastest_sorted_filenames = &sortedFilenames_parallel_cpu;
-        fastest_method = "C++17 Parallel Algorithms CPU";
+    // Calculate average and fastest times
+    for (auto& methodTiming : timingResults)
+    {
+        double total = 0.0;
+        methodTiming.fastest_time = std::numeric_limits<double>::max();
+        for (const auto& t : methodTiming.times)
+        {
+            total += t;
+            if (t < methodTiming.fastest_time)
+                methodTiming.fastest_time = t;
+        }
+        methodTiming.average_time = total / methodTiming.times.size();
     }
 
-    std::cout << "\nFastest Method: " << fastest_method << " with " << min_duration << " seconds." << std::endl;
+    // Display timing results
+    std::cout << "\n=== Performance Summary ===" << std::endl;
+    std::cout << "Method\t\t\tAverage Time (s)\tFastest Time (s)" << std::endl;
+    std::cout << "---------------------------------------------------------------" << std::endl;
+    for (const auto& methodTiming : timingResults)
+    {
+        std::cout << methodTiming.method_name << "\t\t"
+            << methodTiming.average_time << "\t\t\t"
+            << methodTiming.fastest_time << std::endl;
+    }
 
-    // Choose the fastest sorted list for display
-    std::vector<std::string> imageFilenames_sorted = *fastest_sorted_filenames;
+    // Determine the fastest method based on average time
+    double min_average_time = timingResults[0].average_time;
+    size_t fastest_method_index = 0;
+    for (size_t i = 1; i < timingResults.size(); ++i)
+    {
+        if (timingResults[i].average_time < min_average_time)
+        {
+            min_average_time = timingResults[i].average_time;
+            fastest_method_index = i;
+        }
+    }
+
+    std::cout << "\nFastest Method based on average time: " << timingResults[fastest_method_index].method_name
+        << " with an average time of " << timingResults[fastest_method_index].average_time << " seconds." << std::endl;
+
+    // Execute the fastest method once to get the sorted list
+    double final_duration = 0.0;
+    std::vector<std::string> imageFilenames_sorted = sortingMethods[fastest_method_index].func(loadedImages, final_duration);
+    std::cout << "Executing the fastest method once for image display took " << final_duration << " seconds." << std::endl;
 
     // Define some constants
     const int gameWidth = 800;
