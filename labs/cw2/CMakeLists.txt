@@ -14,7 +14,7 @@ set(CMAKE_CUDA_ARCHITECTURES 61)
 include_directories(
     "${CMAKE_SOURCE_DIR}/../contrib"
     "${CMAKE_SOURCE_DIR}/../contrib/sfml/include"
-    "${CMAKE_SOURCE_DIR}/../contrib/stb" # Assuming stb_image.h is here
+    "${CMAKE_SOURCE_DIR}/../contrib/stb"
 )
 
 # Link directories for SFML

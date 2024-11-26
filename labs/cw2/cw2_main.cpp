@@ -18,15 +18,16 @@
 #include <functional>
 #include <memory>
 #include <execution>
+#include <omp.h>
 
 // Include stb_image for image loading
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
-// Include OpenMP for parallelization
-#include <omp.h>
+// Namespace for filesystem
+namespace fs = std::filesystem;
 
-// Define the RGBA structure to match the C++ definition
+// Define the RGBA structure
 struct rgba_t {
     uint8_t r;
     uint8_t g;
@@ -34,31 +35,13 @@ struct rgba_t {
     uint8_t a;
 };
 
-// Declare the CUDA function with C linkage
+// Forward declaration of CUDA function
 extern "C" bool computeColorTemperaturesCUDA(const rgba_t * h_images, double* h_temperatures, int total_pixels);
 
-namespace fs = std::filesystem;
-
-inline double fastGammaCorrection(double value) {
-    // Use a polynomial approximation or fast exponentiation
-    if (value <= 0.04045) {
-        return value / 12.92;
-    }
-    else {
-        return pow(value, 2.4); // Or use a faster approximation
-    }
-}
-
-static double gamma_correction_table[256];
-void initializeGammaCorrectionTable() {
-    for (int i = 0; i < 256; ++i) {
-        double value = i / 255.0;
-        gamma_correction_table[i] = (value <= 0.04045) ? (value / 12.92)
-            : pow((value + 0.055) / 1.055, 2.4);
-    }
-}
-
+// ============================================================================
 // ThreadPool Class Definition
+// ============================================================================
+
 class ThreadPool {
 public:
     // Constructor: Initialize the pool with a given number of threads
@@ -146,8 +129,42 @@ inline ThreadPool::~ThreadPool()
         worker.join();
 }
 
-// Helper function to load RGB data from a file, as a contiguous array (row-major) of RGBA quadruplets
-std::vector<rgba_t> load_rgb(const std::string& filename, int& width, int& height)
+// ============================================================================
+// Precomputed Gamma Correction and pow(x, 2.4) Tables
+// ============================================================================
+
+static double gamma_correction_table_unoptimised[256];
+static double pow24_table_unoptimised[256];
+
+static double gamma_correction_table_optimised[256];
+static double pow24_table_optimised[256];
+
+// Function to initialize the gamma correction and pow24 tables (Unoptimised)
+void initialiseTables_unoptimised() {
+    for (int i = 0; i < 256; ++i) {
+        double value = i / 255.0;
+        gamma_correction_table_unoptimised[i] = (value <= 0.04045) ? (value / 12.92)
+            : pow((value + 0.055) / 1.055, 2.4);
+        pow24_table_unoptimised[i] = gamma_correction_table_unoptimised[i]; // Same as gamma correction
+    }
+}
+
+// Function to initialize the gamma correction and pow24 tables (optimised)
+void initialiseTables_optimised() {
+    for (int i = 0; i < 256; ++i) {
+        double value = i / 255.0;
+        gamma_correction_table_optimised[i] = (value <= 0.04045) ? (value / 12.92)
+            : pow((value + 0.055) / 1.055, 2.4);
+        pow24_table_optimised[i] = gamma_correction_table_optimised[i]; // Precompute pow(x, 2.4)
+    }
+}
+
+// ============================================================================
+// Unoptimised Functions
+// ============================================================================
+
+// Helper function to load RGB data from a file (Unoptimised)
+std::vector<rgba_t> load_rgb_unoptimised(const std::string& filename, int& width, int& height)
 {
     int n;
     unsigned char* data = stbi_load(filename.c_str(), &width, &height, &n, 4);
@@ -162,18 +179,18 @@ std::vector<rgba_t> load_rgb(const std::string& filename, int& width, int& heigh
     return vec;
 }
 
-// Conversion to color temperature
-inline double rgbToColorTemperature(const rgba_t& rgba) {
+// Conversion to color temperature (Unoptimised)
+inline double rgbToColourTemperature_unoptimised(const rgba_t& rgba) {
 
     // Normalize RGB values to [0, 1]
     double red = rgba.r / 255.0;
     double green = rgba.g / 255.0;
     double blue = rgba.b / 255.0;
 
-    // Apply a gamma correction to RGB values (assumed gamma 2.2)
-    red = (red > 0.04045) ? pow((red + 0.055) / 1.055, 2.4) : (red / 12.92);
-    green = (green > 0.04045) ? pow((green + 0.055) / 1.055, 2.4) : (green / 12.92);
-    blue = (blue > 0.04045) ? pow((blue + 0.055) / 1.055, 2.4) : (blue / 12.92);
+    // Apply gamma correction (assumed gamma 2.2)
+    red = (red <= 0.04045) ? (red / 12.92) : pow((red + 0.055) / 1.055, 2.4);
+    green = (green <= 0.04045) ? (green / 12.92) : pow((green + 0.055) / 1.055, 2.4);
+    blue = (blue <= 0.04045) ? (blue / 12.92) : pow((blue + 0.055) / 1.055, 2.4);
 
     // Convert to XYZ color space
     double X = red * 0.4124 + green * 0.3576 + blue * 0.1805;
@@ -188,10 +205,60 @@ inline double rgbToColorTemperature(const rgba_t& rgba) {
 
     // Approximate color temperature using McCamy's formula
     double n = (x - 0.3320) / (0.1858 - y);
-    double CCT = 449.0 * pow(n, 3) + 3525.0 * pow(n, 2) + 6823.3 * n + 5520.33;
+    double CCT = 449.0 * n * n * n + 3525.0 * n * n + 6823.3 * n + 5520.33;
 
     return CCT;
 }
+
+// ============================================================================
+// optimised Functions
+// ============================================================================
+
+// Helper function to load RGB data from a file (optimised)
+std::vector<rgba_t> load_rgb_optimised(const std::string& filename, int& width, int& height)
+{
+    int n;
+    unsigned char* data = stbi_load(filename.c_str(), &width, &height, &n, 4);
+    if (!data)
+    {
+        std::cerr << "Failed to load image: " << filename << std::endl;
+        return {};
+    }
+    const rgba_t* rgbadata = reinterpret_cast<const rgba_t*>(data);
+    std::vector<rgba_t> vec(rgbadata, rgbadata + width * height);
+    stbi_image_free(data);
+    return vec;
+}
+
+// Conversion to color temperature (optimised)
+inline double rgbToColourTemperature_optimised(const rgba_t& rgba) {
+
+    // Normalize RGB values to [0, 1] using precomputed gamma correction table
+    double red = gamma_correction_table_optimised[rgba.r];
+    double green = gamma_correction_table_optimised[rgba.g];
+    double blue = gamma_correction_table_optimised[rgba.b];
+
+    // Convert to XYZ color space
+    double X = red * 0.4124 + green * 0.3576 + blue * 0.1805;
+    double Y = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+    double Z = red * 0.0193 + green * 0.1192 + blue * 0.9505;
+
+    // Calculate chromaticity coordinates
+    double denominator = X + Y + Z;
+    if (denominator == 0) return 0.0; // Prevent division by zero
+    double x = X / denominator;
+    double y = Y / denominator;
+
+    // Approximate color temperature using McCamy's formula
+    double n = (x - 0.3320) / (0.1858 - y);
+    double CCT = 449.0 * n * n * n + 3525.0 * n * n + 6823.3 * n + 5520.33;
+
+    return CCT;
+}
+
+// ============================================================================
+// Median Calculation
+// ============================================================================
 
 // Calculate the median from a vector of temperatures
 double calculate_median(std::vector<double>& temperatures) {
@@ -209,8 +276,12 @@ double calculate_median(std::vector<double>& temperatures) {
     }
 }
 
-// Function to process images in a single-threaded manner
-std::vector<std::string> singleThreadedCPU(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
+// ============================================================================
+// Processing Functions
+// ============================================================================
+
+// Function to process images in a single-threaded manner (Unoptimised)
+std::vector<std::string> singleThreadedCPU_unoptimised(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
 {
     auto start = std::chrono::high_resolution_clock::now();
 
@@ -227,12 +298,12 @@ std::vector<std::string> singleThreadedCPU(const std::vector<std::pair<std::stri
             continue;
         }
 
-        // Compute color temperatures
+        // Compute colour temperatures
         std::vector<double> temperatures;
         temperatures.reserve(rgbadata.size());
         for (const auto& pixel : rgbadata)
         {
-            temperatures.push_back(rgbToColorTemperature(pixel));
+            temperatures.push_back(rgbToColourTemperature_unoptimised(pixel));
         }
 
         // Compute median
@@ -260,7 +331,58 @@ std::vector<std::string> singleThreadedCPU(const std::vector<std::pair<std::stri
     return sortedFilenames;
 }
 
-// Function to process images using std::async
+// Function to process images in a single-threaded manner (optimised)
+std::vector<std::string> singleThreadedCPU_optimised(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
+{
+    auto start = std::chrono::high_resolution_clock::now();
+
+    std::vector<std::pair<std::string, double>> filename_medians;
+    filename_medians.reserve(loadedImages.size());
+
+    for (const auto& pair : loadedImages)
+    {
+        const auto& filename = pair.first;
+        const auto& rgbadata = pair.second;
+
+        if (rgbadata.empty()) {
+            filename_medians.emplace_back(filename, 0.0);
+            continue;
+        }
+
+        // Compute colour temperatures
+        std::vector<double> temperatures;
+        temperatures.reserve(rgbadata.size());
+        for (const auto& pixel : rgbadata)
+        {
+            temperatures.push_back(rgbToColourTemperature_optimised(pixel));
+        }
+
+        // Compute median
+        double median = calculate_median(temperatures);
+        filename_medians.emplace_back(filename, median);
+    }
+
+    // Sort based on median
+    std::sort(filename_medians.begin(), filename_medians.end(),
+        [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) -> bool {
+            return a.second < b.second;
+        });
+
+    // Extract sorted filenames
+    std::vector<std::string> sortedFilenames;
+    sortedFilenames.reserve(filename_medians.size());
+    for (const auto& pair : filename_medians)
+    {
+        sortedFilenames.push_back(pair.first);
+    }
+
+    auto end = std::chrono::high_resolution_clock::now();
+    duration = std::chrono::duration<double>(end - start).count();
+
+    return sortedFilenames;
+}
+
+// Function to process images using std::async (optimised)
 std::vector<std::string> multiThreadedCPUAsync(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
 {
     auto start = std::chrono::high_resolution_clock::now();
@@ -278,12 +400,12 @@ std::vector<std::string> multiThreadedCPUAsync(const std::vector<std::pair<std::
                 return { filename, 0.0 };
             }
 
-        // Compute color temperatures
+        // Compute colour temperatures
         std::vector<double> temperatures;
         temperatures.reserve(rgbadata.size());
         for (const auto& pixel : rgbadata)
         {
-            temperatures.push_back(rgbToColorTemperature(pixel));
+            temperatures.push_back(rgbToColourTemperature_optimised(pixel));
         }
 
         // Compute median
@@ -320,7 +442,7 @@ std::vector<std::string> multiThreadedCPUAsync(const std::vector<std::pair<std::
     return sortedFilenames;
 }
 
-// Function to process images using ThreadPool
+// Function to process images using ThreadPool (optimised)
 std::vector<std::string> multiThreadedCPUThreadPool(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
 {
     auto start = std::chrono::high_resolution_clock::now();
@@ -339,12 +461,12 @@ std::vector<std::string> multiThreadedCPUThreadPool(const std::vector<std::pair<
                 return { filename, 0.0 };
             }
 
-        // Compute color temperatures
+        // Compute colour temperatures
         std::vector<double> temperatures;
         temperatures.reserve(rgbadata.size());
         for (const auto& pixel : rgbadata)
         {
-            temperatures.push_back(rgbToColorTemperature(pixel));
+            temperatures.push_back(rgbToColourTemperature_optimised(pixel));
         }
 
         // Compute median
@@ -381,6 +503,7 @@ std::vector<std::string> multiThreadedCPUThreadPool(const std::vector<std::pair<
     return sortedFilenames;
 }
 
+// optimised Function: Parallel CPU Sort using C++17 Parallel Algorithms with OpenMP and SIMD
 std::vector<std::string> parallelCPUStandardLibrary(
     const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages,
     double& duration)
@@ -392,41 +515,44 @@ std::vector<std::string> parallelCPUStandardLibrary(
     // Pre-allocate the vector with the same size as loadedImages
     std::vector<std::pair<std::string, double>> filename_medians(num_images);
 
-    // Ensure gamma correction table is initialized
-    initializeGammaCorrectionTable();
+    // Use OpenMP to parallelize the outer loop over images
+#pragma omp parallel for schedule(static)
+    for (size_t i = 0; i < num_images; ++i)
+    {
+        const std::string& filename = loadedImages[i].first;
+        const std::vector<rgba_t>& rgbadata = loadedImages[i].second;
 
-    // Use std::for_each with parallel unsequenced execution policy
-    std::for_each(std::execution::par_unseq, loadedImages.begin(), loadedImages.end(),
-        [&](const auto& pair) {
-            const std::string& filename = pair.first;
-            const std::vector<rgba_t>& rgbadata = pair.second;
+        double median = 0.0;
+        if (!rgbadata.empty()) {
+            size_t pixel_count = rgbadata.size();
 
-            double median = 0.0;
-            if (!rgbadata.empty()) {
-                size_t pixel_count = rgbadata.size();
+            // Use a fixed-size array to store temperatures to avoid dynamic allocation
+            std::unique_ptr<double[]> temperatures(new double[pixel_count]);
 
-                // Use aligned storage for temperatures to aid vectorization
-                std::vector<double> temperatures(pixel_count);
-
-                auto* temp_ptr = temperatures.data();
-                auto* rgba_ptr = rgbadata.data();
-
-                // Use compiler-specific pragma for vectorization
-#pragma loop(ivdep)
-                for (size_t i = 0; i < pixel_count; ++i) {
-                    temp_ptr[i] = rgbToColorTemperature(rgba_ptr[i]);
-                }
-
-                // Compute median
-                median = calculate_median(temperatures);
+            // Vectorize the loop using OpenMP SIMD directive
+#pragma omp simd aligned(temperatures, rgbadata: 32)
+            for (size_t j = 0; j < pixel_count; ++j) {
+                temperatures[j] = rgbToColourTemperature_optimised(rgbadata[j]);
             }
 
-            // Store the result
-            size_t index = &pair - &loadedImages[0];
-            filename_medians[index] = { filename, median };
-        });
+            // Compute median
+            if (pixel_count > 0) {
+                size_t mid = pixel_count / 2;
+                std::nth_element(temperatures.get(), temperatures.get() + mid, temperatures.get() + pixel_count);
+                if (pixel_count % 2 == 0) {
+                    median = (temperatures[mid - 1] + temperatures[mid]) / 2.0;
+                }
+                else {
+                    median = temperatures[mid];
+                }
+            }
+        }
 
-    // Sort based on median
+        // Store the result
+        filename_medians[i] = { filename, median };
+    }
+
+    // Sort based on median using C++17 Parallel Algorithms
     std::sort(std::execution::par_unseq, filename_medians.begin(), filename_medians.end(),
         [](const auto& a, const auto& b) {
             return a.second < b.second;
@@ -444,7 +570,7 @@ std::vector<std::string> parallelCPUStandardLibrary(
     return sortedFilenames;
 }
 
-// Function to process images using CUDA
+// Function to process images using CUDA (optimised)
 std::vector<std::string> multiThreadedCPUCUDAMethod(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
 {
     auto start = std::chrono::high_resolution_clock::now();
@@ -496,169 +622,9 @@ std::vector<std::string> multiThreadedCPUCUDAMethod(const std::vector<std::pair<
     return sortedFilenames;
 }
 
-// Function to process images using OpenMP for multi-threading
-std::vector<std::string> openMPCPU(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
-{
-    auto start = std::chrono::high_resolution_clock::now();
-
-    // Determine the number of threads
-    int num_threads = omp_get_max_threads();
-
-    // Initialize thread-local storage for filename and median pairs
-    std::vector<std::vector<std::pair<std::string, double>>> thread_filename_medians(num_threads);
-    for (int t = 0; t < num_threads; ++t) {
-        thread_filename_medians[t].reserve(loadedImages.size() / num_threads + 1);
-    }
-
-    // Parallelize the outer loop over images using OpenMP
-#pragma omp parallel
-    {
-        int thread_id = omp_get_thread_num();
-        auto& local_filename_medians = thread_filename_medians[thread_id];
-
-#pragma omp for schedule(dynamic)
-        for (size_t i = 0; i < loadedImages.size(); ++i)
-        {
-            const auto& filename = loadedImages[i].first;
-            const auto& rgbadata = loadedImages[i].second;
-
-            double median = 0.0;
-
-            if (!rgbadata.empty()) {
-                size_t pixel_count = rgbadata.size();
-                std::vector<double> temperatures;
-                temperatures.reserve(pixel_count);
-                temperatures.resize(pixel_count);
-
-                // Compute color temperatures using SIMD vectorization
-#pragma omp simd
-                for (size_t j = 0; j < pixel_count; ++j)
-                {
-                    temperatures[j] = rgbToColorTemperature(rgbadata[j]);
-                }
-
-                // Calculate the median temperature
-                median = calculate_median(temperatures);
-            }
-
-            // Store the result in thread-local storage
-            local_filename_medians.emplace_back(filename, median);
-        }
-    }
-
-    // Merge all thread-local filename_medians into a single vector
-    std::vector<std::pair<std::string, double>> filename_medians;
-    filename_medians.reserve(loadedImages.size());
-
-    for (int t = 0; t < num_threads; ++t)
-    {
-        auto& thread_medians = thread_filename_medians[t];
-        filename_medians.insert(filename_medians.end(),
-            std::make_move_iterator(thread_medians.begin()),
-            std::make_move_iterator(thread_medians.end()));
-    }
-
-    // Sort the filename_medians based on median using C++17 Parallel Algorithms
-    std::sort(std::execution::par, filename_medians.begin(), filename_medians.end(),
-        [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) -> bool {
-            return a.second < b.second;
-        });
-
-    // Extract the sorted filenames
-    std::vector<std::string> sortedFilenames;
-    sortedFilenames.reserve(filename_medians.size());
-    for (auto& pair : filename_medians)
-    {
-        sortedFilenames.emplace_back(std::move(pair.first));
-    }
-
-    auto end = std::chrono::high_resolution_clock::now();
-    duration = std::chrono::duration<double>(end - start).count();
-
-    return sortedFilenames;
-}
-
-// Function to process images using SIMD (Single Instruction, Multiple Data) with OpenMP
-std::vector<std::string> simdCPU(const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages, double& duration)
-{
-    auto start = std::chrono::high_resolution_clock::now();
-
-    // Determine the number of threads
-    int num_threads = omp_get_max_threads();
-
-    // Initialize thread-local storage for filename and median pairs
-    std::vector<std::vector<std::pair<std::string, double>>> thread_filename_medians(num_threads);
-    for (int t = 0; t < num_threads; ++t) {
-        thread_filename_medians[t].reserve(loadedImages.size() / num_threads + 1);
-    }
-
-    // Parallelize the outer loop over images using OpenMP
-#pragma omp parallel
-    {
-        int thread_id = omp_get_thread_num();
-        auto& local_filename_medians = thread_filename_medians[thread_id];
-
-#pragma omp for schedule(dynamic)
-        for (size_t i = 0; i < loadedImages.size(); ++i)
-        {
-            const auto& filename = loadedImages[i].first;
-            const auto& rgbadata = loadedImages[i].second;
-
-            double median = 0.0;
-
-            if (!rgbadata.empty()) {
-                size_t pixel_count = rgbadata.size();
-                std::vector<double> temperatures;
-                temperatures.reserve(pixel_count);
-                temperatures.resize(pixel_count);
-
-                // Compute color temperatures using SIMD vectorization
-#pragma omp simd
-                for (size_t j = 0; j < pixel_count; ++j)
-                {
-                    temperatures[j] = rgbToColorTemperature(rgbadata[j]);
-                }
-
-                // Calculate the median temperature
-                median = calculate_median(temperatures);
-            }
-
-            // Store the result in thread-local storage
-            local_filename_medians.emplace_back(filename, median);
-        }
-    }
-
-    // Merge all thread-local filename_medians into a single vector
-    std::vector<std::pair<std::string, double>> filename_medians;
-    filename_medians.reserve(loadedImages.size());
-
-    for (int t = 0; t < num_threads; ++t)
-    {
-        auto& thread_medians = thread_filename_medians[t];
-        filename_medians.insert(filename_medians.end(),
-            std::make_move_iterator(thread_medians.begin()),
-            std::make_move_iterator(thread_medians.end()));
-    }
-
-    // Sort the filename_medians based on median using C++17 Parallel Algorithms
-    std::sort(std::execution::par, filename_medians.begin(), filename_medians.end(),
-        [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) -> bool {
-            return a.second < b.second;
-        });
-
-    // Extract the sorted filenames
-    std::vector<std::string> sortedFilenames;
-    sortedFilenames.reserve(filename_medians.size());
-    for (auto& pair : filename_medians)
-    {
-        sortedFilenames.emplace_back(std::move(pair.first));
-    }
-
-    auto end = std::chrono::high_resolution_clock::now();
-    duration = std::chrono::duration<double>(end - start).count();
-
-    return sortedFilenames;
-}
+// ============================================================================
+// Verification Function
+// ============================================================================
 
 // Helper function to verify that all sorted lists are identical
 bool verify_sorting_results(const std::vector<std::pair<std::string, std::vector<std::string>>>& sorted_results)
@@ -680,6 +646,10 @@ bool verify_sorting_results(const std::vector<std::pair<std::string, std::vector
 
     return all_match;
 }
+
+// ============================================================================
+// Main Function
+// ============================================================================
 
 int main()
 {
@@ -708,6 +678,10 @@ int main()
         return -1;
     }
 
+    // Initialize gamma correction and pow24 tables for both unoptimised and optimised functions
+    initialiseTables_unoptimised();
+    initialiseTables_optimised();
+
     // Preload all images in parallel using ThreadPool
     ThreadPool pool(std::thread::hardware_concurrency());
     std::vector<std::future<std::pair<std::string, std::vector<rgba_t>>>> futures_load;
@@ -717,7 +691,9 @@ int main()
     {
         futures_load.emplace_back(pool.enqueue([filename]() -> std::pair<std::string, std::vector<rgba_t>> {
             int width, height;
-        auto rgbadata = load_rgb(filename, width, height);
+        // Choose which load function to use here
+        // For preloading, we'll use the optimised version
+        auto rgbadata = load_rgb_optimised(filename, width, height);
         return { filename, std::move(rgbadata) };
             }));
     }
@@ -731,60 +707,53 @@ int main()
     }
 
     // Containers to hold sorted filenames for each method
-    std::vector<std::string> sortedFilenames_single;       //Single Thread
-    std::vector<std::string> sortedFilenames_async;        //async
-    std::vector<std::string> sortedFilenames_pool;         //Thread Pool
+    std::vector<std::string> sortedFilenames_single_unoptimised;       // Single Thread Unoptimised
+    std::vector<std::string> sortedFilenames_single_optimised;         // Single Thread optimised
+    std::vector<std::string> sortedFilenames_async;        // Async
+    std::vector<std::string> sortedFilenames_pool;         // Thread Pool
     std::vector<std::string> sortedFilenames_parallel_cpu; // C++17 Parallel Algorithms CPU
     std::vector<std::string> sortedFilenames_cuda;         // CUDA
-    std::vector<std::string> sortedFilenames_openmp;       // OpenMP
-    std::vector<std::string> sortedFilenames_simd;         // SIMD
 
     // Containers to hold durations
-    double duration_single = 0.0;       //Single Thread
-    double duration_async = 0.0;        //async
-    double duration_pool = 0.0;         //Thread Pool
+    double duration_single_unoptimised = 0.0;       // Single Thread Unoptimised
+    double duration_single_optimised = 0.0;         // Single Thread optimised
+    double duration_async = 0.0;        // Async
+    double duration_pool = 0.0;         // Thread Pool
     double duration_parallel_cpu = 0.0; // C++17 Parallel Algorithms CPU
     double duration_cuda = 0.0;         // CUDA
-    double duration_openmp = 0.0;       // OpenMP
-    double duration_simd = 0.0;         // SIMD
 
-    // Single-Threaded CPU Sort
-    sortedFilenames_single = singleThreadedCPU(loadedImages, duration_single);
-    std::cout << "Single-Threaded CPU Sort Time: " << duration_single << " seconds" << std::endl;
+    // Single-Threaded CPU Sort (Unoptimised)
+    sortedFilenames_single_unoptimised = singleThreadedCPU_unoptimised(loadedImages, duration_single_unoptimised);
+    std::cout << "Single-Threaded CPU Sort (Unoptimised) Time: " << duration_single_unoptimised << " seconds" << std::endl;
 
-    // Multi-Threaded CPU Sort using std::async
+    // Single-Threaded CPU Sort (optimised)
+    sortedFilenames_single_optimised = singleThreadedCPU_optimised(loadedImages, duration_single_optimised);
+    std::cout << "Single-Threaded CPU Sort (optimised) Time: " << duration_single_optimised << " seconds" << std::endl;
+
+    // Multi-Threaded CPU Sort using std::async (optimised)
     sortedFilenames_async = multiThreadedCPUAsync(loadedImages, duration_async);
     std::cout << "Multi-Threaded CPU Sort using std::async Time: " << duration_async << " seconds" << std::endl;
 
-    // Multi-Threaded CPU Sort using ThreadPool
+    // Multi-Threaded CPU Sort using ThreadPool (optimised)
     sortedFilenames_pool = multiThreadedCPUThreadPool(loadedImages, duration_pool);
     std::cout << "Multi-Threaded CPU Sort using ThreadPool Time: " << duration_pool << " seconds" << std::endl;
 
-    // C++17 Parallel Algorithms-Based CPU Sort
+    // C++17 Parallel Algorithms-Based CPU Sort (optimised)
     sortedFilenames_parallel_cpu = parallelCPUStandardLibrary(loadedImages, duration_parallel_cpu);
     std::cout << "C++17 Parallel Algorithms CPU Sort Time: " << duration_parallel_cpu << " seconds" << std::endl;
 
-    // GPU-Accelerated CPU Sort using CUDA
+    // GPU-Accelerated CPU Sort using CUDA (optimised)
     sortedFilenames_cuda = multiThreadedCPUCUDAMethod(loadedImages, duration_cuda);
     std::cout << "GPU-Accelerated CPU Sort using CUDA Time: " << duration_cuda << " seconds" << std::endl;
 
-    // OpenMP-Based CPU Sort
-    sortedFilenames_openmp = openMPCPU(loadedImages, duration_openmp);
-    std::cout << "OpenMP-Based CPU Sort Time: " << duration_openmp << " seconds" << std::endl;
-
-    // SIMD-Based CPU Sort
-    sortedFilenames_simd = simdCPU(loadedImages, duration_simd);
-    std::cout << "SIMD-Based CPU Sort Time: " << duration_simd << " seconds" << std::endl;
-
     // Organize all sorted results with their method names
     std::vector<std::pair<std::string, std::vector<std::string>>> sorted_results = {
-        { "Single-Threaded CPU", sortedFilenames_single },
+        { "Single-Threaded CPU (Unoptimised)", sortedFilenames_single_unoptimised },
+        { "Single-Threaded CPU (optimised)", sortedFilenames_single_optimised },
         { "Multi-Threaded CPU using std::async", sortedFilenames_async },
         { "Multi-Threaded CPU using ThreadPool", sortedFilenames_pool },
         { "C++17 Parallel Algorithms CPU", sortedFilenames_parallel_cpu },
-        { "GPU-Accelerated CUDA", sortedFilenames_cuda },
-        { "OpenMP-Based CPU", sortedFilenames_openmp },
-        { "SIMD-Based CPU", sortedFilenames_simd }
+        { "GPU-Accelerated CUDA", sortedFilenames_cuda }
     };
 
     // Verify that all sorted lists are identical
@@ -799,51 +768,38 @@ int main()
         std::cout << "\nSome sorting methods produced different results. Please check the above discrepancies." << std::endl;
     }
 
-    // Determine the fastest method to display (optional)
-    double min_duration = duration_single;
-    std::vector<std::string>* fastest_sorted_filenames = &sortedFilenames_single;
+    // Determine the fastest method to display
+    double min_duration = duration_single_unoptimised;
+    std::vector<std::string>* fastest_sorted_filenames = &sortedFilenames_single_unoptimised;
+    std::string fastest_method = "Single-Threaded CPU (Unoptimised)";
 
+    if (duration_single_optimised < min_duration) {
+        min_duration = duration_single_optimised;
+        fastest_sorted_filenames = &sortedFilenames_single_optimised;
+        fastest_method = "Single-Threaded CPU (optimised)";
+    }
     if (duration_async < min_duration) {
         min_duration = duration_async;
         fastest_sorted_filenames = &sortedFilenames_async;
+        fastest_method = "Multi-Threaded CPU using std::async";
     }
     if (duration_pool < min_duration) {
         min_duration = duration_pool;
         fastest_sorted_filenames = &sortedFilenames_pool;
+        fastest_method = "Multi-Threaded CPU using ThreadPool";
     }
     if (duration_parallel_cpu < min_duration) {
         min_duration = duration_parallel_cpu;
         fastest_sorted_filenames = &sortedFilenames_parallel_cpu;
+        fastest_method = "C++17 Parallel Algorithms CPU";
     }
     if (duration_cuda < min_duration) {
         min_duration = duration_cuda;
         fastest_sorted_filenames = &sortedFilenames_cuda;
-    }
-    if (duration_openmp < min_duration) {
-        min_duration = duration_openmp;
-        fastest_sorted_filenames = &sortedFilenames_openmp;
-    }
-    if (duration_simd < min_duration) {
-        min_duration = duration_simd;
-        fastest_sorted_filenames = &sortedFilenames_simd;
+        fastest_method = "GPU-Accelerated CUDA";
     }
 
-    std::cout << "\nFastest Method: ";
-
-    if (fastest_sorted_filenames == &sortedFilenames_single)
-        std::cout << "Single-Threaded CPU" << std::endl;
-    else if (fastest_sorted_filenames == &sortedFilenames_async)
-        std::cout << "Multi-Threaded CPU using std::async" << std::endl;
-    else if (fastest_sorted_filenames == &sortedFilenames_pool)
-        std::cout << "Multi-Threaded CPU using ThreadPool" << std::endl;
-    else if (fastest_sorted_filenames == &sortedFilenames_parallel_cpu)
-        std::cout << "C++17 Parallel Algorithms CPU" << std::endl;
-    else if (fastest_sorted_filenames == &sortedFilenames_cuda)
-        std::cout << "GPU-Accelerated CUDA" << std::endl;
-    else if (fastest_sorted_filenames == &sortedFilenames_openmp)
-        std::cout << "OpenMP-Based CPU" << std::endl;
-    else if (fastest_sorted_filenames == &sortedFilenames_simd)
-        std::cout << "SIMD-Based CPU" << std::endl;
+    std::cout << "\nFastest Method: " << fastest_method << " with " << min_duration << " seconds." << std::endl;
 
     // Choose the fastest sorted list for display
     std::vector<std::string> imageFilenames_sorted = *fastest_sorted_filenames;
@@ -868,7 +824,7 @@ int main()
     }
     sf::Sprite sprite(texture);
 
-    // Make sure the texture fits the screen
+    // Function to scale sprite based on texture and window size
     auto SpriteScaleFromDimensions = [](const sf::Vector2u& textureSize, int screenWidth, int screenHeight) -> sf::Vector2f {
         float scaleX = static_cast<float>(screenWidth) / static_cast<float>(textureSize.x);
         float scaleY = static_cast<float>(screenHeight) / static_cast<float>(textureSize.y);

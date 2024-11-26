@@ -11,7 +11,7 @@ struct rgba_t {
     uint8_t a;
 };
 
-// Optimized Kernel using double precision
+// optimised Kernel using double precision
 __global__ void computeColorTemperaturesKernel(const rgba_t* __restrict__ d_images, double* __restrict__ d_temperatures, int total_pixels) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total_pixels) return;
