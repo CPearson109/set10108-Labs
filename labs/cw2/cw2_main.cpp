@@ -20,6 +20,16 @@
 #include <execution>
 #include <omp.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <pdh.h>
+#include <pdhmsg.h>
+#pragma comment(lib, "pdh.lib")
+#elif __linux__
+#include <fstream>
+#include <unistd.h>
+#endif
+
 // Include stb_image for image loading
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -36,7 +46,7 @@ struct rgba_t {
 };
 
 // ============================================================================
-/* ThreadPool Class Definition */
+# // ThreadPool Class Definition
 // ============================================================================
 
 class ThreadPool {
@@ -89,7 +99,7 @@ inline ThreadPool::ThreadPool(size_t threads)
                     task();
                 }
             }
-        );
+            );
 }
 
 // Enqueue method implementation
@@ -127,7 +137,7 @@ inline ThreadPool::~ThreadPool()
 }
 
 // ============================================================================
-/* Precomputed Gamma Correction and pow(x, 2.4) Tables */
+# // Precomputed Gamma Correction and pow(x, 2.4) Tables
 // ============================================================================
 
 static double gamma_correction_table_unoptimised[256];
@@ -157,7 +167,7 @@ void initialiseTables_optimised() {
 }
 
 // ============================================================================
-/* Unoptimised Functions */
+# // Unoptimised Functions
 // ============================================================================
 
 // Helper function to load RGB data from a file (Unoptimised)
@@ -208,7 +218,7 @@ inline double rgbToColourTemperature_unoptimised(const rgba_t& rgba) {
 }
 
 // ============================================================================
-/* Optimised Functions */
+# // Optimised Functions
 // ============================================================================
 
 // Helper function to load RGB data from a file (Optimised)
@@ -254,7 +264,7 @@ inline double rgbToColourTemperature_optimised(const rgba_t& rgba) {
 }
 
 // ============================================================================
-/* Median Calculation */
+# // Median Calculation
 // ============================================================================
 
 // Calculate the median from a vector of temperatures
@@ -274,7 +284,191 @@ double calculate_median(std::vector<double>& temperatures) {
 }
 
 // ============================================================================
-/* Processing Functions */
+# // CPU Usage Monitoring
+// ============================================================================
+
+struct CPUUsage {
+    double cpu_usage; // Percentage
+};
+
+struct CPUStats { // Defined only for Linux
+    unsigned long user;
+    unsigned long nice;
+    unsigned long system;
+    unsigned long idle;
+    unsigned long iowait;
+    unsigned long irq;
+    unsigned long softirq;
+    unsigned long steal;
+    unsigned long guest;
+    unsigned long guest_nice;
+};
+
+class CPUUsageMonitor {
+public:
+    CPUUsageMonitor();
+    CPUUsage getCPUUsage();
+private:
+#ifdef _WIN32
+    ULONGLONG prevSystemTime;
+    ULONGLONG prevProcessTime;
+    int num_processors;
+    bool first_call;
+#elif __linux__
+    unsigned long long prev_process_utime;
+    unsigned long long prev_process_stime;
+    unsigned long long prev_total_time;
+    bool first_call;
+#endif
+};
+
+// Constructor implementation
+CPUUsageMonitor::CPUUsageMonitor()
+    : first_call(true)
+{
+#ifdef _WIN32
+    SYSTEM_INFO sysInfo;
+    GetSystemInfo(&sysInfo);
+    num_processors = sysInfo.dwNumberOfProcessors;
+
+    FILETIME ftCreation, ftExit, ftKernel, ftUser;
+    GetProcessTimes(GetCurrentProcess(), &ftCreation, &ftExit, &ftKernel, &ftUser);
+
+    // Convert FILETIME to ULONGLONG
+    ULONGLONG proc_kernel = ((ULONGLONG)ftKernel.dwHighDateTime << 32) | ftKernel.dwLowDateTime;
+    ULONGLONG proc_user = ((ULONGLONG)ftUser.dwHighDateTime << 32) | ftUser.dwLowDateTime;
+    prevProcessTime = proc_kernel + proc_user;
+
+    // Get system time
+    FILETIME ftIdle, ftSysKernel, ftSysUser;
+    GetSystemTimes(&ftIdle, &ftSysKernel, &ftSysUser);
+    ULONGLONG sys_kernel = ((ULONGLONG)ftSysKernel.dwHighDateTime << 32) | ftSysKernel.dwLowDateTime;
+    ULONGLONG sys_user = ((ULONGLONG)ftSysUser.dwHighDateTime << 32) | ftSysUser.dwLowDateTime;
+    prevSystemTime = sys_kernel + sys_user;
+#elif __linux__
+    // Read /proc/stat for total CPU time
+    std::ifstream procStat("/proc/stat");
+    CPUStats stats;
+    std::string cpu;
+    procStat >> cpu >> stats.user >> stats.nice >> stats.system >> stats.idle
+        >> stats.iowait >> stats.irq >> stats.softirq >> stats.steal
+        >> stats.guest >> stats.guest_nice;
+
+    prev_total_time = stats.user + stats.nice + stats.system + stats.idle +
+        stats.iowait + stats.irq + stats.softirq + stats.steal +
+        stats.guest + stats.guest_nice;
+
+    // Read /proc/self/stat for process CPU time
+    std::ifstream procSelfStat("/proc/self/stat");
+    std::string dummy;
+    int pid;
+    std::string comm;
+    char state;
+    long ppid, pgrp, session, tty_nr, tpgid;
+    unsigned long flags, minflt, cminflt, majflt, cmajflt;
+    unsigned long long utime, stime;
+    // skip fields up to utime (14th) and stime (15th)
+    procSelfStat >> pid >> comm >> state >> ppid >> pgrp >> session >> tty_nr >> tpgid
+        >> flags >> minflt >> cminflt >> majflt >> cmajflt >> utime >> stime;
+    prev_process_utime = utime;
+    prev_process_stime = stime;
+
+    first_call = true;
+#endif
+}
+
+// Get CPU Usage implementation
+CPUUsage CPUUsageMonitor::getCPUUsage()
+{
+    CPUUsage usage = { 0.0 };
+#ifdef _WIN32
+    FILETIME ftIdle, ftSysKernel, ftSysUser;
+    FILETIME ftCreation, ftExit, ftKernel, ftUser;
+
+    // Get current system times
+    GetSystemTimes(&ftIdle, &ftSysKernel, &ftSysUser);
+    ULONGLONG sys_kernel = ((ULONGLONG)ftSysKernel.dwHighDateTime << 32) | ftSysKernel.dwLowDateTime;
+    ULONGLONG sys_user = ((ULONGLONG)ftSysUser.dwHighDateTime << 32) | ftSysUser.dwLowDateTime;
+    ULONGLONG currentSystemTime = sys_kernel + sys_user;
+
+    // Get current process times
+    GetProcessTimes(GetCurrentProcess(), &ftCreation, &ftExit, &ftKernel, &ftUser);
+    ULONGLONG proc_kernel = ((ULONGLONG)ftKernel.dwHighDateTime << 32) | ftKernel.dwLowDateTime;
+    ULONGLONG proc_user = ((ULONGLONG)ftUser.dwHighDateTime << 32) | ftUser.dwLowDateTime;
+    ULONGLONG currentProcessTime = proc_kernel + proc_user;
+
+    // Calculate deltas
+    ULONGLONG deltaSys = currentSystemTime - prevSystemTime;
+    ULONGLONG deltaProc = currentProcessTime - prevProcessTime;
+
+    if (deltaSys > 0)
+    {
+        // CPU usage as a percentage of total CPU time
+        usage.cpu_usage = (static_cast<double>(deltaProc) / deltaSys) * 100.0 / num_processors;
+        // Clamp the value between 0 and 100*num_processors to prevent anomalies
+        if (usage.cpu_usage < 0.0) usage.cpu_usage = 0.0;
+        if (usage.cpu_usage > 100.0 * num_processors) usage.cpu_usage = 100.0 * num_processors;
+    }
+    else
+    {
+        usage.cpu_usage = 0.0;
+    }
+
+    // Update previous times
+    prevSystemTime = currentSystemTime;
+    prevProcessTime = currentProcessTime;
+#elif __linux__
+    // Read /proc/stat for total CPU time
+    std::ifstream procStat("/proc/stat");
+    CPUStats currentStats;
+    std::string cpu;
+    procStat >> cpu >> currentStats.user >> currentStats.nice >> currentStats.system >> currentStats.idle
+        >> currentStats.iowait >> currentStats.irq >> currentStats.softirq >> currentStats.steal
+        >> currentStats.guest >> currentStats.guest_nice;
+
+    unsigned long long current_total_time = currentStats.user + currentStats.nice + currentStats.system + currentStats.idle +
+        currentStats.iowait + currentStats.irq + currentStats.softirq + currentStats.steal +
+        currentStats.guest + currentStats.guest_nice;
+
+    // Read /proc/self/stat for process CPU time
+    std::ifstream procSelfStat("/proc/self/stat");
+    std::string dummy;
+    int pid;
+    std::string comm;
+    char state;
+    long ppid, pgrp, session, tty_nr, tpgid;
+    unsigned long flags, minflt, cminflt, majflt, cmajflt;
+    unsigned long long utime, stime;
+    // skip fields up to utime (14th) and stime (15th)
+    procSelfStat >> pid >> comm >> state >> ppid >> pgrp >> session >> tty_nr >> tpgid
+        >> flags >> minflt >> cminflt >> majflt >> cmajflt >> utime >> stime;
+    unsigned long long current_process_time = utime + stime;
+
+    // Calculate deltas
+    unsigned long long delta_total_time = current_total_time - prev_total_time;
+    unsigned long long delta_process_time = current_process_time - (prev_process_utime + prev_process_stime);
+
+    double cpu_usage = 0.0;
+    if (delta_total_time > 0)
+    {
+        cpu_usage = (static_cast<double>(delta_process_time) / delta_total_time) * 100.0;
+        // Clamp the value between 0 and 100 to prevent anomalies
+        if (cpu_usage < 0.0) cpu_usage = 0.0;
+        if (cpu_usage > 100.0) cpu_usage = 100.0;
+    }
+
+    usage.cpu_usage = cpu_usage;
+
+    // Update previous times
+    prev_total_time = current_total_time;
+    prev_process_utime = utime;
+    prev_process_stime = stime;
+#endif
+    return usage;
+}
+
+// ============================================================================
+# // Processing Functions
 // ============================================================================
 
 // Function to process images in a single-threaded manner (Unoptimised)
@@ -397,17 +591,17 @@ std::vector<std::string> multiThreadedCPUAsync(const std::vector<std::pair<std::
                 return { filename, 0.0 };
             }
 
-            // Compute colour temperatures
-            std::vector<double> temperatures;
-            temperatures.reserve(rgbadata.size());
-            for (const auto& pixel : rgbadata)
-            {
-                temperatures.push_back(rgbToColourTemperature_optimised(pixel));
-            }
+        // Compute colour temperatures
+        std::vector<double> temperatures;
+        temperatures.reserve(rgbadata.size());
+        for (const auto& pixel : rgbadata)
+        {
+            temperatures.push_back(rgbToColourTemperature_optimised(pixel));
+        }
 
-            // Compute median
-            double median = calculate_median(temperatures);
-            return { filename, median };
+        // Compute median
+        double median = calculate_median(temperatures);
+        return { filename, median };
             }));
     }
 
@@ -458,17 +652,17 @@ std::vector<std::string> multiThreadedCPUThreadPool(const std::vector<std::pair<
                 return { filename, 0.0 };
             }
 
-            // Compute colour temperatures
-            std::vector<double> temperatures;
-            temperatures.reserve(rgbadata.size());
-            for (const auto& pixel : rgbadata)
-            {
-                temperatures.push_back(rgbToColourTemperature_optimised(pixel));
-            }
+        // Compute colour temperatures
+        std::vector<double> temperatures;
+        temperatures.reserve(rgbadata.size());
+        for (const auto& pixel : rgbadata)
+        {
+            temperatures.push_back(rgbToColourTemperature_optimised(pixel));
+        }
 
-            // Compute median
-            double median = calculate_median(temperatures);
-            return { filename, median };
+        // Compute median
+        double median = calculate_median(temperatures);
+        return { filename, median };
             }));
     }
 
@@ -500,7 +694,7 @@ std::vector<std::string> multiThreadedCPUThreadPool(const std::vector<std::pair<
     return sortedFilenames;
 }
 
-// Optimised Function: Parallel CPU Sort using C++17 Parallel Algorithms with OpenMP and SIMD
+// Optimised Function: Parallel CPU Sort using C++17 Parallel Algorithms with SIMD
 std::vector<std::string> parallelCPUStandardLibrary(
     const std::vector<std::pair<std::string, std::vector<rgba_t>>>& loadedImages,
     double& duration)
@@ -512,46 +706,44 @@ std::vector<std::string> parallelCPUStandardLibrary(
     // Pre-allocate the vector with the same size as loadedImages
     std::vector<std::pair<std::string, double>> filename_medians(num_images);
 
-    // Use OpenMP to parallelize the outer loop over images
-#pragma omp parallel for schedule(static)
-    for (size_t i = 0; i < num_images; ++i)
-    {
-        const std::string& filename = loadedImages[i].first;
-        const std::vector<rgba_t>& rgbadata = loadedImages[i].second;
+    // Use C++17 Parallel Algorithms to process images in parallel
+    std::transform(std::execution::par, loadedImages.begin(), loadedImages.end(), filename_medians.begin(),
+        [](const std::pair<std::string, std::vector<rgba_t>>& pair) -> std::pair<std::string, double> {
+            const std::string& filename = pair.first;
+    const std::vector<rgba_t>& rgbadata = pair.second;
 
-        double median = 0.0;
-        if (!rgbadata.empty()) {
-            size_t pixel_count = rgbadata.size();
+    double median = 0.0;
+    if (!rgbadata.empty()) {
+        size_t pixel_count = rgbadata.size();
 
-            // Use a fixed-size array to store temperatures to avoid dynamic allocation
-            std::unique_ptr<double[]> temperatures(new double[pixel_count]);
+        // Preallocate a vector for temperatures
+        std::vector<double> temperatures(pixel_count);
 
-            // Vectorize the loop using OpenMP SIMD directive
-#pragma omp simd aligned(temperatures, rgbadata: 32)
-            for (size_t j = 0; j < pixel_count; ++j) {
-                temperatures[j] = rgbToColourTemperature_optimised(rgbadata[j]);
+        // Compute color temperatures in parallel (vectorized)
+        std::transform(std::execution::par_unseq, rgbadata.begin(), rgbadata.end(), temperatures.begin(),
+            [](const rgba_t& pixel) -> double {
+                return rgbToColourTemperature_optimised(pixel);
+            });
+
+        // Compute median
+        if (pixel_count > 0) {
+            size_t mid = pixel_count / 2;
+            std::nth_element(temperatures.begin(), temperatures.begin() + mid, temperatures.end());
+            if (pixel_count % 2 == 0) {
+                median = (temperatures[mid - 1] + temperatures[mid]) / 2.0;
             }
-
-            // Compute median
-            if (pixel_count > 0) {
-                size_t mid = pixel_count / 2;
-                std::nth_element(temperatures.get(), temperatures.get() + mid, temperatures.get() + pixel_count);
-                if (pixel_count % 2 == 0) {
-                    median = (temperatures[mid - 1] + temperatures[mid]) / 2.0;
-                }
-                else {
-                    median = temperatures[mid];
-                }
+            else {
+                median = temperatures[mid];
             }
         }
-
-        // Store the result
-        filename_medians[i] = { filename, median };
     }
+
+    return { filename, median };
+        });
 
     // Sort based on median using C++17 Parallel Algorithms
     std::sort(std::execution::par_unseq, filename_medians.begin(), filename_medians.end(),
-        [](const auto& a, const auto& b) {
+        [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) -> bool {
             return a.second < b.second;
         });
 
@@ -559,7 +751,7 @@ std::vector<std::string> parallelCPUStandardLibrary(
     std::vector<std::string> sortedFilenames(num_images);
     std::transform(std::execution::par, filename_medians.begin(), filename_medians.end(),
         sortedFilenames.begin(),
-        [](const auto& pair) { return pair.first; });
+        [](const std::pair<std::string, double>& pair) -> std::string { return pair.first; });
 
     auto end = std::chrono::high_resolution_clock::now();
     duration = std::chrono::duration<double>(end - start).count();
@@ -567,8 +759,9 @@ std::vector<std::string> parallelCPUStandardLibrary(
     return sortedFilenames;
 }
 
+
 // ============================================================================
-/* Verification Function */
+# // Verification Function
 // ============================================================================
 
 // Helper function to verify that all sorted lists are identical
@@ -593,7 +786,7 @@ bool verify_sorting_results(const std::vector<std::pair<std::string, std::vector
 }
 
 // ============================================================================
-/* Main Function */
+# // Main Function
 // ============================================================================
 
 int main()
@@ -604,6 +797,9 @@ int main()
     unsigned int num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0) num_threads = 2; // Fallback if hardware_concurrency is not well-defined
     std::cout << "Number of hardware threads available: " << num_threads << std::endl;
+
+    // Initialize CPU Usage Monitor
+    CPUUsageMonitor cpuMonitor;
 
     // Prompt user for number of runs
     int num_runs = 1;
@@ -624,7 +820,7 @@ int main()
     }
 
     // Example folder to load images
-    const std::string image_folder = "imagesLarge";
+    const std::string image_folder = "imagesSmall";
     if (!fs::is_directory(image_folder))
     {
         printf("Directory \"%s\" not found: please make sure it exists, and if it's a relative path, it's under your WORKING directory\n", image_folder.c_str());
@@ -659,9 +855,9 @@ int main()
     {
         futures_load.emplace_back(pool.enqueue([filename]() -> std::pair<std::string, std::vector<rgba_t>> {
             int width, height;
-            // For preloading, we'll use the optimised version
-            auto rgbadata = load_rgb_optimised(filename, width, height);
-            return { filename, std::move(rgbadata) };
+        // For preloading, we'll use the optimised version
+        auto rgbadata = load_rgb_optimised(filename, width, height);
+        return { filename, std::move(rgbadata) };
             }));
     }
 
@@ -687,63 +883,91 @@ int main()
         { "C++17 Parallel Algorithms CPU", parallelCPUStandardLibrary }
     };
 
-    // Structure to hold timing information
+    // Structure to hold timing and CPU usage information
     struct MethodTiming {
         std::string method_name;
         std::vector<double> times;
         double average_time;
         double fastest_time;
+        std::vector<double> cpu_usages; // CPU usage percentages
+        double average_cpu_usage;
     };
 
     std::vector<MethodTiming> timingResults;
+    timingResults.reserve(sortingMethods.size());
 
     // Initialize timing results
     for (const auto& method : sortingMethods)
     {
-        timingResults.push_back(MethodTiming{ method.name, {}, 0.0, std::numeric_limits<double>::max() });
+        timingResults.push_back(MethodTiming{ method.name, {}, 0.0, 0.0, {}, 0.0 });
     }
 
     // Execute each sorting method multiple times
     for (int run = 1; run <= num_runs; ++run)
     {
         std::cout << "\nRun " << run << " of " << num_runs << ":" << std::endl;
+
         for (size_t i = 0; i < sortingMethods.size(); ++i)
         {
             double duration = 0.0;
+            double cpuUsage = 0.0;
+
             // Execute the sorting method
             std::vector<std::string> sortedFilenames = sortingMethods[i].func(loadedImages, duration);
 
-            // Record the duration
-            timingResults[i].times.push_back(duration);
+            // Capture CPU usage after the sorting method
+            CPUUsage usage = cpuMonitor.getCPUUsage();
+            cpuUsage = usage.cpu_usage;
 
-            // Output the duration for this run
-            std::cout << "  [" << sortingMethods[i].name << "] Time: " << duration << " seconds" << std::endl;
+            // Clamp CPU usage to [0, 100*num_processors] for Windows and [0, 100] for Linux
+#ifdef _WIN32
+            if (cpuUsage < 0.0) cpuUsage = 0.0;
+            if (cpuUsage > 100.0 * num_threads) cpuUsage = 100.0 * num_threads;
+#elif __linux__
+            if (cpuUsage < 0.0) cpuUsage = 0.0;
+            if (cpuUsage > 100.0) cpuUsage = 100.0;
+#endif
+
+            // Record the duration and CPU usage
+            timingResults[i].times.push_back(duration);
+            timingResults[i].cpu_usages.push_back(cpuUsage);
+
+            // Output the duration and CPU usage for this run
+            std::cout << "  [" << sortingMethods[i].name << "] Time: " << duration << " seconds | CPU Usage: " << cpuUsage << "%" << std::endl;
         }
     }
 
-    // Calculate average and fastest times
+    // Calculate average and fastest times and average CPU usages
     for (auto& methodTiming : timingResults)
     {
-        double total = 0.0;
-        methodTiming.fastest_time = std::numeric_limits<double>::max();
-        for (const auto& t : methodTiming.times)
+        double total_time = 0.0;
+        double min_time = std::numeric_limits<double>::max();
+        double total_cpu = 0.0;
+
+        for (size_t j = 0; j < methodTiming.times.size(); ++j)
         {
-            total += t;
-            if (t < methodTiming.fastest_time)
-                methodTiming.fastest_time = t;
+            total_time += methodTiming.times[j];
+            if (methodTiming.times[j] < min_time)
+                min_time = methodTiming.times[j];
+
+            total_cpu += methodTiming.cpu_usages[j];
         }
-        methodTiming.average_time = total / methodTiming.times.size();
+
+        methodTiming.average_time = (methodTiming.times.empty()) ? 0.0 : (total_time / methodTiming.times.size());
+        methodTiming.fastest_time = (methodTiming.times.empty()) ? 0.0 : min_time;
+        methodTiming.average_cpu_usage = (methodTiming.cpu_usages.empty()) ? 0.0 : (total_cpu / methodTiming.cpu_usages.size());
     }
 
-    // Display timing results
+    // Display timing and CPU usage results
     std::cout << "\n=== Performance Summary ===" << std::endl;
-    std::cout << "Method\t\t\tAverage Time (s)\tFastest Time (s)" << std::endl;
-    std::cout << "---------------------------------------------------------------" << std::endl;
+    std::cout << "Method\t\t\tAverage Time (s)\tFastest Time (s)\tAverage CPU Usage (%)" << std::endl;
+    std::cout << "-----------------------------------------------------------------------------------------" << std::endl;
     for (const auto& methodTiming : timingResults)
     {
         std::cout << methodTiming.method_name << "\t\t"
             << methodTiming.average_time << "\t\t\t"
-            << methodTiming.fastest_time << std::endl;
+            << methodTiming.fastest_time << "\t\t\t"
+            << methodTiming.average_cpu_usage << std::endl;
     }
 
     // Determine the fastest method based on average time
@@ -763,8 +987,25 @@ int main()
 
     // Execute the fastest method once to get the sorted list
     double final_duration = 0.0;
+    double final_cpu_usage = 0.0;
+
+    // Execute the fastest method
     std::vector<std::string> imageFilenames_sorted = sortingMethods[fastest_method_index].func(loadedImages, final_duration);
-    std::cout << "Executing the fastest method once for image display took " << final_duration << " seconds." << std::endl;
+
+    // Capture CPU usage after the fastest method
+    CPUUsage finalUsage = cpuMonitor.getCPUUsage();
+    final_cpu_usage = finalUsage.cpu_usage;
+
+    // Clamp CPU usage to [0, 100*num_processors] for Windows and [0, 100] for Linux
+#ifdef _WIN32
+    if (final_cpu_usage < 0.0) final_cpu_usage = 0.0;
+    if (final_cpu_usage > 100.0 * num_threads) final_cpu_usage = 100.0 * num_threads;
+#elif __linux__
+    if (final_cpu_usage < 0.0) final_cpu_usage = 0.0;
+    if (final_cpu_usage > 100.0) final_cpu_usage = 100.0;
+#endif
+
+    std::cout << "Executing the fastest method once for image display took " << final_duration << " seconds | CPU Usage: " << final_cpu_usage << "%" << std::endl;
 
     // Define some constants
     const int gameWidth = 800;
@@ -792,7 +1033,7 @@ int main()
         float scaleY = static_cast<float>(screenHeight) / static_cast<float>(textureSize.y);
         float scale = std::min(scaleX, scaleY);
         return { scale, scale };
-        };
+    };
     sprite.setScale(SpriteScaleFromDimensions(texture.getSize(), gameWidth, gameHeight));
 
     // Main loop
