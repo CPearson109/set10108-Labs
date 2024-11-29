@@ -25,9 +25,6 @@
 #include <pdh.h>
 #include <pdhmsg.h>
 #pragma comment(lib, "pdh.lib")
-#elif __linux__
-#include <fstream>
-#include <unistd.h>
 #endif
 
 // Include stb_image for image loading
@@ -46,7 +43,7 @@ struct rgba_t {
 };
 
 // ============================================================================
-# // ThreadPool Class Definition
+// ThreadPool Class Definition
 // ============================================================================
 
 class ThreadPool {
@@ -137,7 +134,7 @@ inline ThreadPool::~ThreadPool()
 }
 
 // ============================================================================
-# // Precomputed Gamma Correction and pow(x, 2.4) Tables
+// Precomputed Gamma Correction and pow(x, 2.4) Tables
 // ============================================================================
 
 static double gamma_correction_table_unoptimised[256];
@@ -167,7 +164,7 @@ void initialiseTables_optimised() {
 }
 
 // ============================================================================
-# // Unoptimised Functions
+// Unoptimised Functions
 // ============================================================================
 
 // Helper function to load RGB data from a file (Unoptimised)
@@ -218,7 +215,7 @@ inline double rgbToColourTemperature_unoptimised(const rgba_t& rgba) {
 }
 
 // ============================================================================
-# // Optimised Functions
+// Optimised Functions
 // ============================================================================
 
 // Helper function to load RGB data from a file (Optimised)
@@ -264,7 +261,7 @@ inline double rgbToColourTemperature_optimised(const rgba_t& rgba) {
 }
 
 // ============================================================================
-# // Median Calculation
+// Median Calculation
 // ============================================================================
 
 // Calculate the median from a vector of temperatures
@@ -284,24 +281,11 @@ double calculate_median(std::vector<double>& temperatures) {
 }
 
 // ============================================================================
-# // CPU Usage Monitoring
+// CPU Usage Monitoring
 // ============================================================================
 
 struct CPUUsage {
     double cpu_usage; // Percentage
-};
-
-struct CPUStats { // Defined only for Linux
-    unsigned long user;
-    unsigned long nice;
-    unsigned long system;
-    unsigned long idle;
-    unsigned long iowait;
-    unsigned long irq;
-    unsigned long softirq;
-    unsigned long steal;
-    unsigned long guest;
-    unsigned long guest_nice;
 };
 
 class CPUUsageMonitor {
@@ -313,11 +297,6 @@ private:
     ULONGLONG prevSystemTime;
     ULONGLONG prevProcessTime;
     int num_processors;
-    bool first_call;
-#elif __linux__
-    unsigned long long prev_process_utime;
-    unsigned long long prev_process_stime;
-    unsigned long long prev_total_time;
     bool first_call;
 #endif
 };
@@ -345,35 +324,6 @@ CPUUsageMonitor::CPUUsageMonitor()
     ULONGLONG sys_kernel = ((ULONGLONG)ftSysKernel.dwHighDateTime << 32) | ftSysKernel.dwLowDateTime;
     ULONGLONG sys_user = ((ULONGLONG)ftSysUser.dwHighDateTime << 32) | ftSysUser.dwLowDateTime;
     prevSystemTime = sys_kernel + sys_user;
-#elif __linux__
-    // Read /proc/stat for total CPU time
-    std::ifstream procStat("/proc/stat");
-    CPUStats stats;
-    std::string cpu;
-    procStat >> cpu >> stats.user >> stats.nice >> stats.system >> stats.idle
-        >> stats.iowait >> stats.irq >> stats.softirq >> stats.steal
-        >> stats.guest >> stats.guest_nice;
-
-    prev_total_time = stats.user + stats.nice + stats.system + stats.idle +
-        stats.iowait + stats.irq + stats.softirq + stats.steal +
-        stats.guest + stats.guest_nice;
-
-    // Read /proc/self/stat for process CPU time
-    std::ifstream procSelfStat("/proc/self/stat");
-    std::string dummy;
-    int pid;
-    std::string comm;
-    char state;
-    long ppid, pgrp, session, tty_nr, tpgid;
-    unsigned long flags, minflt, cminflt, majflt, cmajflt;
-    unsigned long long utime, stime;
-    // skip fields up to utime (14th) and stime (15th)
-    procSelfStat >> pid >> comm >> state >> ppid >> pgrp >> session >> tty_nr >> tpgid
-        >> flags >> minflt >> cminflt >> majflt >> cmajflt >> utime >> stime;
-    prev_process_utime = utime;
-    prev_process_stime = stime;
-
-    first_call = true;
 #endif
 }
 
@@ -417,58 +367,12 @@ CPUUsage CPUUsageMonitor::getCPUUsage()
     // Update previous times
     prevSystemTime = currentSystemTime;
     prevProcessTime = currentProcessTime;
-#elif __linux__
-    // Read /proc/stat for total CPU time
-    std::ifstream procStat("/proc/stat");
-    CPUStats currentStats;
-    std::string cpu;
-    procStat >> cpu >> currentStats.user >> currentStats.nice >> currentStats.system >> currentStats.idle
-        >> currentStats.iowait >> currentStats.irq >> currentStats.softirq >> currentStats.steal
-        >> currentStats.guest >> currentStats.guest_nice;
-
-    unsigned long long current_total_time = currentStats.user + currentStats.nice + currentStats.system + currentStats.idle +
-        currentStats.iowait + currentStats.irq + currentStats.softirq + currentStats.steal +
-        currentStats.guest + currentStats.guest_nice;
-
-    // Read /proc/self/stat for process CPU time
-    std::ifstream procSelfStat("/proc/self/stat");
-    std::string dummy;
-    int pid;
-    std::string comm;
-    char state;
-    long ppid, pgrp, session, tty_nr, tpgid;
-    unsigned long flags, minflt, cminflt, majflt, cmajflt;
-    unsigned long long utime, stime;
-    // skip fields up to utime (14th) and stime (15th)
-    procSelfStat >> pid >> comm >> state >> ppid >> pgrp >> session >> tty_nr >> tpgid
-        >> flags >> minflt >> cminflt >> majflt >> cmajflt >> utime >> stime;
-    unsigned long long current_process_time = utime + stime;
-
-    // Calculate deltas
-    unsigned long long delta_total_time = current_total_time - prev_total_time;
-    unsigned long long delta_process_time = current_process_time - (prev_process_utime + prev_process_stime);
-
-    double cpu_usage = 0.0;
-    if (delta_total_time > 0)
-    {
-        cpu_usage = (static_cast<double>(delta_process_time) / delta_total_time) * 100.0;
-        // Clamp the value between 0 and 100 to prevent anomalies
-        if (cpu_usage < 0.0) cpu_usage = 0.0;
-        if (cpu_usage > 100.0) cpu_usage = 100.0;
-    }
-
-    usage.cpu_usage = cpu_usage;
-
-    // Update previous times
-    prev_total_time = current_total_time;
-    prev_process_utime = utime;
-    prev_process_stime = stime;
 #endif
     return usage;
 }
 
 // ============================================================================
-# // Processing Functions
+// Processing Functions
 // ============================================================================
 
 // Function to process images in a single-threaded manner (Unoptimised)
@@ -761,7 +665,7 @@ std::vector<std::string> parallelCPUStandardLibrary(
 
 
 // ============================================================================
-# // Verification Function
+// Verification Function
 // ============================================================================
 
 // Helper function to verify that all sorted lists are identical
@@ -786,7 +690,7 @@ bool verify_sorting_results(const std::vector<std::pair<std::string, std::vector
 }
 
 // ============================================================================
-# // Main Function
+// Main Function
 // ============================================================================
 
 int main()
@@ -919,13 +823,10 @@ int main()
             CPUUsage usage = cpuMonitor.getCPUUsage();
             cpuUsage = usage.cpu_usage;
 
-            // Clamp CPU usage to [0, 100*num_processors] for Windows and [0, 100] for Linux
+            // Clamp CPU usage to [0, 100*num_processors] for Windows
 #ifdef _WIN32
             if (cpuUsage < 0.0) cpuUsage = 0.0;
             if (cpuUsage > 100.0 * num_threads) cpuUsage = 100.0 * num_threads;
-#elif __linux__
-            if (cpuUsage < 0.0) cpuUsage = 0.0;
-            if (cpuUsage > 100.0) cpuUsage = 100.0;
 #endif
 
             // Record the duration and CPU usage
@@ -996,13 +897,10 @@ int main()
     CPUUsage finalUsage = cpuMonitor.getCPUUsage();
     final_cpu_usage = finalUsage.cpu_usage;
 
-    // Clamp CPU usage to [0, 100*num_processors] for Windows and [0, 100] for Linux
+    // Clamp CPU usage to [0, 100*num_processors] for Windows
 #ifdef _WIN32
     if (final_cpu_usage < 0.0) final_cpu_usage = 0.0;
     if (final_cpu_usage > 100.0 * num_threads) final_cpu_usage = 100.0 * num_threads;
-#elif __linux__
-    if (final_cpu_usage < 0.0) final_cpu_usage = 0.0;
-    if (final_cpu_usage > 100.0) final_cpu_usage = 100.0;
 #endif
 
     std::cout << "Executing the fastest method once for image display took " << final_duration << " seconds | CPU Usage: " << final_cpu_usage << "%" << std::endl;
